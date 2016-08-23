@@ -143,6 +143,17 @@ def test_bayer_array(camera, mode):
             assert stream.array.shape == (2464, 3280, 3)
             assert stream.demosaic().shape == (2464, 3280, 3)
 
+def test_fast_bayer_array(camera, mode):
+    with picamera.array.PiFastBayerArray(camera) as stream:
+        camera.capture(stream, 'jpeg', bayer=True)
+        # Bayer data is always full res, and the demosaicing algorithm halves it
+        if camera.exif_tags['IFD0.Model'].upper() == 'RP_OV5647':
+            assert stream.array.shape == (1944, 2592*5/4)
+            assert stream.demosaic().shape == (1944/2, 2592/2, 3)
+        else:
+            assert stream.array.shape == (2464, 3280*5/4, 3)
+            assert stream.demosaic().shape == (2464/2, 3280/2, 3)
+
 def test_motion_array1(camera, mode):
     resolution, framerate = mode
     if resolution == (2592, 1944):
