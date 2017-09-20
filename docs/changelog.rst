@@ -7,6 +7,71 @@ Change log
 .. currentmodule:: picamera
 
 
+Release 1.13 (2017-02-25)
+=========================
+
+1.13 includes numerous bug fixes and several major enhancements, mostly in the
+:mod:`~picamera.mmalobj` layer:
+
+* 10 second captures should now work with the V2 module as the default
+  ``CAPTURE_TIMEOUT`` has been increased to 60 seconds (`#284`_)
+* A bug in :meth:`~PiCameraCircularIO.copy_to` caused it to copy nothing when
+  it encountered "unknown" timestamps in the stream (`#302`_, `#319`_, `#357`_)
+* A silly typo in code used by :class:`~picamera.array.PiRGBArray` was fixed
+  (`#321`_)
+* A bug in :meth:`~PiCamera.capture_continuous` which caused duplicate frames
+  in the output was fixed (`#311`_)
+* Bitrate limits were removed on MJPEG, and full checking of H264 bitrates and
+  macroblocks/s was implemented (`#315`_)
+* A bug was fixed in the :attr:`~PiCamera.sensor_mode` attribute which
+  prevented it from being set after construction (`#324`_)
+* A bug in the custom encoders example was fixed (`#337`_)
+* Fixed a rare race condition that occurred when multiple splitter ports were
+  in use (`#344`_)
+* Recording overlays is now possible, but currently requires using the lower
+  level :mod:`~picamera.mmalobj` layer (`#196`_)
+* Capturing YUV arrays via :class:`~picamera.array.PiYUVArray` is faster,
+  thanks to GitHub user goosst (`#308`_)
+* Added the ability to specify a restart interval for JPEG encoding (`#369`_)
+* Added a property allowing users to manually specify a
+  :attr:`~PiCamera.framerate_range` for the camera (`#374`_)
+* Added support for partially transparent overlays in RGBA format (`#199`_)
+* Improved MJPEG web-streaming recipe, many thanks to GitHub user BigNerd95!
+  (`#375`_)
+
+Substantial work has also gone into improving the documentation. In particular:
+
+* The :doc:`recipes2` chapter has been thoroughly re-worked and I would
+  encourage anyone using the camera for Computer Vision purposes to re-read
+  that chapter
+* The :doc:`fov` chapter has been extended to include a thorough introduction
+  to the low level operation of the camera module. This is important for
+  understanding the limitations and peculiarities of the system
+* Anyone interested in using a lower level API to control the camera (which
+  includes capabilities like manipulating frames before they hit the video
+  encoder) should read the :doc:`api_mmalobj` chapter
+* Finally, some work was done on enhancing the PDF and EPub versions of the
+  documentation. These should now be much more useable in hard-copy and on
+  e-readers
+
+.. _#196: https://github.com/waveform80/picamera/issues/196
+.. _#199: https://github.com/waveform80/picamera/issues/199
+.. _#284: https://github.com/waveform80/picamera/issues/284
+.. _#302: https://github.com/waveform80/picamera/issues/302
+.. _#308: https://github.com/waveform80/picamera/issues/308
+.. _#311: https://github.com/waveform80/picamera/issues/311
+.. _#315: https://github.com/waveform80/picamera/issues/315
+.. _#319: https://github.com/waveform80/picamera/issues/319
+.. _#321: https://github.com/waveform80/picamera/issues/321
+.. _#324: https://github.com/waveform80/picamera/issues/324
+.. _#337: https://github.com/waveform80/picamera/issues/337
+.. _#344: https://github.com/waveform80/picamera/issues/344
+.. _#357: https://github.com/waveform80/picamera/issues/357
+.. _#369: https://github.com/waveform80/picamera/issues/369
+.. _#374: https://github.com/waveform80/picamera/issues/374
+.. _#375: https://github.com/waveform80/picamera/issues/375
+
+
 Release 1.12 (2016-07-03)
 =========================
 
@@ -66,7 +131,7 @@ requests from me in the last couple of months!
 .. _#241: https://github.com/waveform80/picamera/issues/241
 .. _#257: https://github.com/waveform80/picamera/issues/257
 .. _#212: https://github.com/waveform80/picamera/issues/212
-.. _#279: https://github.com/waveform80/picamera/issues/279
+.. _#279: https://github.com/waveform80/picamera/pull/279
 .. _#216: https://github.com/waveform80/picamera/issues/216
 .. _#240: https://github.com/waveform80/picamera/issues/240
 .. _#218: https://github.com/waveform80/picamera/issues/218
@@ -146,11 +211,11 @@ requests, and thanks for all the great bug reports. Happy new year everyone!
 .. _#168: https://github.com/waveform80/picamera/issues/168
 .. _#170: https://github.com/waveform80/picamera/issues/170
 .. _#171: https://github.com/waveform80/picamera/issues/171
-.. _#172: https://github.com/waveform80/picamera/issues/172
+.. _#172: https://github.com/waveform80/picamera/pull/172
 .. _#174: https://github.com/waveform80/picamera/issues/174
-.. _#176: https://github.com/waveform80/picamera/issues/176
+.. _#176: https://github.com/waveform80/picamera/pull/176
 .. _#177: https://github.com/waveform80/picamera/issues/177
-.. _#179: https://github.com/waveform80/picamera/issues/179
+.. _#179: https://github.com/waveform80/picamera/pull/179
 .. _#180: https://github.com/waveform80/picamera/issues/180
 .. _#182: https://github.com/waveform80/picamera/issues/182
 
@@ -427,7 +492,7 @@ Release 1.1 (2014-01-25)
 * A couple of documentation enhancements made it in (`#41`_ and `#47`_)
 
 .. _#40: https://github.com/waveform80/picamera/issues/40
-.. _#41: https://github.com/waveform80/picamera/issues/41
+.. _#41: https://github.com/waveform80/picamera/pull/41
 .. _#46: https://github.com/waveform80/picamera/issues/46
 .. _#47: https://github.com/waveform80/picamera/issues/47
 

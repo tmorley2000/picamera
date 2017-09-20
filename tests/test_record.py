@@ -1,7 +1,7 @@
 # vim: set et sw=4 sts=4 fileencoding=utf-8:
 #
 # Python camera library for the Rasperry-Pi camera module
-# Copyright (c) 2013-2015 Dave Jones <dave@waveform.org.uk>
+# Copyright (c) 2013-2017 Dave Jones <dave@waveform.org.uk>
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions are met:
@@ -88,8 +88,10 @@ def format_options(request):
 def expected_failures(resolution, format, options):
     if resolution == (2592, 1944) and 'resize' not in options:
         pytest.xfail('Cannot encode video at max resolution')
-    if resolution[1] > 1080 and format == 'mjpeg':
+    if resolution.height > 1080 and format == 'mjpeg':
         pytest.xfail('Locks up camera')
+    if resolution.height >= 1080 and format.startswith('rgb'):
+        pytest.xfail('Split point often times out due to excessive IO delays')
 
 
 def test_record_to_file(camera, previewing, mode, filenames_format_options):
@@ -312,4 +314,26 @@ def test_record_bad_format(camera):
         camera.start_recording('test.mp4')
     with pytest.raises(picamera.PiCameraValueError):
         camera.start_recording('test.h264', format='mp4')
+
+def test_record_bad_timestamp(camera):
+    # Frame timestamps should be None or positive integers. Prior to #357
+    # getting fixed a None timestamp (from a 0 PTS) would be followed by a
+    # large negative timestamp (from an unrecognized TIME_UNKNOWN timestamp)
+    class Timestamps(object):
+        def __init__(self, camera):
+            self.camera = camera
+            self.timestamps = []
+            self.none_count = 0
+        def write(self, buf):
+            if self.camera.frame.complete:
+                self.timestamps.append(self.camera.frame.timestamp)
+                if self.camera.frame.timestamp is None:
+                    self.none_count += 1
+    output = Timestamps(camera)
+    camera.start_recording(output, 'h264')
+    while output.none_count < 2:
+        camera.wait_recording(1)
+    camera.stop_recording()
+    for timestamp in output.timestamps:
+        assert timestamp is None or timestamp >= 0
 

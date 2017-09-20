@@ -4,7 +4,7 @@
 License
 =======
 
-Copyright 2013-2015 `Dave Jones`_
+Copyright 2013-2017 `Dave Jones`_
 
 Redistribution and use in source and binary forms, with or without
 modification, are permitted provided that the following conditions are met:
@@ -53,5 +53,5 @@ the public domain.
 
 
 .. _Dave Jones: mailto:dave@waveform.org.uk
-.. _Bayer_pattern_on_sensor.svg: http://en.wikipedia.org/wiki/File:Bayer_pattern_on_sensor.svg
-.. _Yuv420.svg: http://en.wikipedia.org/wiki/File:Yuv420.svg
+.. _Bayer_pattern_on_sensor.svg: https://en.wikipedia.org/wiki/File:Bayer_pattern_on_sensor.svg
+.. _Yuv420.svg: https://en.wikipedia.org/wiki/File:Yuv420.svg

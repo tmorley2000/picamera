@@ -1,7 +1,7 @@
 # vim: set et sw=4 sts=4 fileencoding=utf-8:
 #
 # Python camera library for the Rasperry-Pi camera module
-# Copyright (c) 2013-2015 Dave Jones <dave@waveform.org.uk>
+# Copyright (c) 2013-2017 Dave Jones <dave@waveform.org.uk>
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions are met:
@@ -34,12 +34,8 @@ from __future__ import (
     absolute_import,
     )
 
-# Make Py2's str and range equivalent to Py3's
+# Make Py2's str equivalent to Py3's
 str = type('')
-try:
-    range = xrange
-except NameError:
-    pass
 
 import warnings
 import datetime
@@ -48,6 +44,7 @@ import ctypes as ct
 import threading
 from fractions import Fraction
 from operator import itemgetter
+from collections import namedtuple
 
 from . import bcm_host, mmal, mmalobj as mo
 from .exc import (
@@ -60,11 +57,9 @@ from .exc import (
     PiCameraMMALError,
     PiCameraDeprecated,
     PiCameraFallback,
-    mmal_check,
     )
 from .encoders import (
     PiVideoFrame,
-    PiVideoFrameType,
     PiVideoEncoder,
     PiRawVideoEncoder,
     PiCookedVideoEncoder,
@@ -120,12 +115,13 @@ class PiCamera(object):
     will represent. Only the Raspberry Pi compute module currently supports
     more than one camera.
 
-    The *sensor_mode*, *resolution*, *framerate*, and *clock_mode* parameters
-    provide initial values for the :attr:`sensor_mode`, :attr:`resolution`,
-    :attr:`framerate`, and :attr:`clock_mode` attributes of the class (these
-    attributes are all relatively expensive to set individually, hence setting
-    them all upon construction is a speed optimization). Please refer to the
-    attribute documentation for more information and default values.
+    The *sensor_mode*, *resolution*, *framerate*, *framerate_range*, and
+    *clock_mode* parameters provide initial values for the :attr:`sensor_mode`,
+    :attr:`resolution`, :attr:`framerate`, :attr:`framerate_range`, and
+    :attr:`clock_mode` attributes of the class (these attributes are all
+    relatively expensive to set individually, hence setting them all upon
+    construction is a speed optimization). Please refer to the attribute
+    documentation for more information and default values.
 
     The *stereo_mode* and *stereo_decimate* parameters configure dual cameras
     on a compute module for sterescopic mode. These parameters can only be set
@@ -184,7 +180,10 @@ class PiCamera(object):
         Added *clock_mode* parameter, and permitted setting of resolution as
         appropriately formatted string.
 
-    .. _Compute Module: http://www.raspberrypi.org/documentation/hardware/computemodule/cmio-camera.md
+    .. versionchanged:: 1.13
+        Added *framerate_range* parameter.
+
+    .. _Compute Module: https://www.raspberrypi.org/documentation/hardware/computemodule/cmio-camera.md
     """
 
     CAMERA_PREVIEW_PORT = 0
@@ -193,7 +192,7 @@ class PiCamera(object):
     MAX_RESOLUTION = PiCameraMaxResolution # modified by PiCamera.__init__
     MAX_FRAMERATE = PiCameraMaxFramerate # modified by PiCamera.__init__
     DEFAULT_ANNOTATE_SIZE = 32
-    CAPTURE_TIMEOUT = 30
+    CAPTURE_TIMEOUT = 60
 
     METER_MODES = {
         'average': mmal.MMAL_PARAM_EXPOSUREMETERINGMODE_AVERAGE,
@@ -310,6 +309,7 @@ class PiCamera(object):
         '_camera',
         '_camera_config',
         '_camera_exception',
+        '_revision',
         '_preview',
         '_preview_alpha',
         '_preview_layer',
@@ -328,7 +328,7 @@ class PiCamera(object):
     def __init__(
             self, camera_num=0, stereo_mode='none', stereo_decimate=False,
             resolution=None, framerate=None, sensor_mode=0, led_pin=None,
-            clock_mode='reset'):
+            clock_mode='reset', framerate_range=None):
         bcm_host.bcm_host_init()
         mimetypes.add_type('application/h264',  '.h264',  False)
         mimetypes.add_type('application/mjpeg', '.mjpg',  False)
@@ -366,43 +366,59 @@ class PiCamera(object):
         self._image_effect_params = None
         with mo.MMALCameraInfo() as camera_info:
             info = camera_info.control.params[mmal.MMAL_PARAMETER_CAMERA_INFO]
+            self._revision = 'ov5647'
+            if camera_info.info_rev > 1:
+                self._revision = info.cameras[camera_num].camera_name.decode('ascii')
             self._exif_tags = {
-                'IFD0.Model': 'RP_OV5647',
+                'IFD0.Model': 'RP_%s' % self._revision,
                 'IFD0.Make': 'RaspberryPi',
                 }
-            if camera_info.info_rev > 1:
-                self._exif_tags['IFD0.Model'] = 'RP_%s' % info.cameras[camera_num].camera_name.decode('ascii')
             if PiCamera.MAX_RESOLUTION is PiCameraMaxResolution:
-                PiCamera.MAX_RESOLUTION = mo.PiCameraResolution(
+                PiCamera.MAX_RESOLUTION = mo.PiResolution(
                         info.cameras[camera_num].max_width,
                         info.cameras[camera_num].max_height,
                         )
-            if PiCamera.MAX_FRAMERATE is PiCameraMaxFramerate:
-                if self.exif_tags['IFD0.Model'].upper() == 'RP_OV5647':
-                    PiCamera.MAX_FRAMERATE = 90
-                else:
-                    PiCamera.MAX_FRAMERATE = 120
-            if resolution is None:
-                # Get screen resolution
-                w = ct.c_uint32()
-                h = ct.c_uint32()
-                if bcm_host.graphics_get_display_size(0, w, h) == -1:
-                    w = 1280
-                    h = 720
-                else:
-                    w = int(w.value)
-                    h = int(h.value)
-                resolution = mo.PiCameraResolution(w, h)
-            elif resolution is PiCameraMaxResolution:
-                resolution = PiCamera.MAX_RESOLUTION
+        if PiCamera.MAX_FRAMERATE is PiCameraMaxFramerate:
+            if self._revision.upper() == 'OV5647':
+                PiCamera.MAX_FRAMERATE = 90
             else:
-                resolution = mo.to_resolution(resolution)
+                PiCamera.MAX_FRAMERATE = 120
+        if resolution is None:
+            # Get screen resolution
+            w = ct.c_uint32()
+            h = ct.c_uint32()
+            if bcm_host.graphics_get_display_size(0, w, h) == -1:
+                w = 1280
+                h = 720
+            else:
+                w = int(w.value)
+                h = int(h.value)
+            resolution = mo.PiResolution(w, h)
+        elif resolution is PiCameraMaxResolution:
+            resolution = PiCamera.MAX_RESOLUTION
+        else:
+            resolution = mo.to_resolution(resolution)
+        if framerate_range is None:
             if framerate is None:
                 framerate = 30
             elif framerate is PiCameraMaxFramerate:
                 framerate = PiCamera.MAX_FRAMERATE
             else:
                 framerate = mo.to_fraction(framerate)
+        elif framerate is not None:
+            raise PiCameraValueError(
+                "Can't specify framerate and framerate_range")
+        else:
+            try:
+                low, high = framerate_range
+            except TypeError:
+                raise PiCameraValueError(
+                    "framerate_range must have (low, high) values")
+            if low is PiCameraMaxFramerate:
+                low = PiCamera.MAX_FRAMERATE
+            if high is PiCameraMaxFramerate:
+                high = PiCamera.MAX_FRAMERATE
+            framerate = (mo.to_fraction(low), mo.to_fraction(high))
         try:
             stereo_mode = self.STEREO_MODES[stereo_mode]
         except KeyError:
@@ -416,7 +432,7 @@ class PiCamera(object):
             self._configure_camera(sensor_mode, framerate, resolution, clock_mode)
             self._init_preview()
             self._init_splitter()
-            self._camera.enabled = True
+            self._camera.enable()
             self._init_defaults()
         except:
             self.close()
@@ -485,7 +501,8 @@ class PiCamera(object):
         # video recordings and captures where use_video_port=True to occur
         # simultaneously (#26)
         self._splitter = mo.MMALSplitter()
-        self._splitter.connect(self._camera.outputs[self.CAMERA_VIDEO_PORT])
+        self._splitter.inputs[0].connect(
+                self._camera.outputs[self.CAMERA_VIDEO_PORT]).enable()
 
     def _init_preview(self):
         # Create a null-sink component, enable it and connect it to the
@@ -798,7 +815,7 @@ class PiCamera(object):
         self._preview = PiNullSink(
             self, self._camera.outputs[self.CAMERA_PREVIEW_PORT])
 
-    def add_overlay(self, source, size=None, **options):
+    def add_overlay(self, source, size=None, format=None, **options):
         """
         Adds a static overlay to the preview output.
 
@@ -808,23 +825,28 @@ class PiCamera(object):
         overlays can exist; each call to :meth:`add_overlay` returns a new
         :class:`PiOverlayRenderer` instance representing the overlay.
 
+        The *source* must be an object that supports the :ref:`buffer protocol
+        <bufferobjects>` in one of the supported unencoded formats: ``'yuv'``,
+        ``'rgb'``, ``'rgba'``, ``'bgr'``, or ``'bgra'``. The format can
+        specified explicitly with the optional *format* parameter. If not
+        specified, the method will attempt to guess the format based on the
+        length of *source* and the *size* (assuming 3 bytes per pixel for RGB,
+        and 4 bytes for RGBA).
+
         The optional *size* parameter specifies the size of the source image as
         a ``(width, height)`` tuple. If this is omitted or ``None`` then the
         size is assumed to be the same as the camera's current
         :attr:`resolution`.
 
-        The *source* must be an object that supports the :ref:`buffer protocol
-        <bufferobjects>` which has the same length as an image in `RGB`_ format
-        (colors represented as interleaved unsigned bytes) with the specified
-        *size* after the width has been rounded up to the nearest multiple of
-        32, and the height has been rounded up to the nearest multiple of 16.
-
-        For example, if *size* is ``(1280, 720)``, then *source* must be a
-        buffer with length 1280 × 720 × 3 bytes, or 2,764,800 bytes (because
-        1280 is a multiple of 32, and 720 is a multiple of 16 no extra rounding
-        is required).  However, if *size* is ``(97, 57)``, then *source* must
-        be a buffer with length 128 × 64 × 3 bytes, or 24,576 bytes (pixels
-        beyond column 97 and row 57 in the source will be ignored).
+        The length of *source* must take into account that widths are rounded
+        up to the nearest multiple of 32, and heights to the nearest multiple
+        of 16.  For example, if *size* is ``(1280, 720)``, and *format* is
+        ``'rgb'``, then *source* must be a buffer with length 1280 × 720 × 3
+        bytes, or 2,764,800 bytes (because 1280 is a multiple of 32, and 720 is
+        a multiple of 16 no extra rounding is required).  However, if *size* is
+        ``(97, 57)``, and *format* is ``'rgb'`` then *source* must be a buffer
+        with length 128 × 64 × 3 bytes, or 24,576 bytes (pixels beyond column
+        97 and row 57 in the source will be ignored).
 
         New overlays default to *layer* 0, whilst the preview defaults to layer
         2. Higher numbered layers obscure lower numbered layers, hence new
@@ -858,12 +880,16 @@ class PiCamera(object):
             an off-screen buffer. Be aware that this requires more GPU memory
             and may reduce the update rate.
 
-        .. _RGB: http://en.wikipedia.org/wiki/RGB
+        .. _RGB: https://en.wikipedia.org/wiki/RGB
+        .. _RGBA: https://en.wikipedia.org/wiki/RGBA_color_space
 
         .. versionadded:: 1.8
+
+        .. versionchanged:: 1.13
+            Added *format* parameter
         """
         self._check_camera_open()
-        renderer = PiOverlayRenderer(self, source, size, **options)
+        renderer = PiOverlayRenderer(self, source, size, format, **options)
         self._overlays.append(renderer)
         return renderer
 
@@ -938,11 +964,11 @@ class PiCamera(object):
         additional options:
 
         * *profile* - The H.264 profile to use for encoding. Defaults to
-          'high', but can be one of 'baseline', 'main', 'high', or
+          'high', but can be one of 'baseline', 'main', 'extended', 'high', or
           'constrained'.
 
-        * *level* - The H.264 level to use for encoding. Defaults to '4', but
-          can be one of '4', '4.1', or '4.2'.
+        * *level* - The `H.264 level`_ to use for encoding. Defaults to '4',
+          but can be any H.264 level up to '4.2'.
 
         * *intra_period* - The key frame rate (the rate at which I-frames are
           inserted in the output). Defaults to ``None``, but can be any 32-bit
@@ -966,6 +992,9 @@ class PiCamera(object):
           "Supplemental Enhancement Information" within the output stream.
           Defaults to ``False`` if not specified.
 
+        * *sps_timing* - When ``True`` the encoder includes the camera's
+          framerate in the SPS header. Defaults to ``False`` if not specified.
+
         * *motion_output* - Indicates the output destination for motion vector
           estimation data. When ``None`` (the default), motion data is not
           output. Otherwise, this can be a filename string, a file-like object,
@@ -974,10 +1003,10 @@ class PiCamera(object):
         All encoded formats accept the following additional options:
 
         * *bitrate* - The bitrate at which video will be encoded. Defaults to
-          17000000 (17Mbps) if not specified.  The maximum value is 25000000
-          (25Mbps), except for H.264 level 4.2 for which the maximum is
-          62500000 (62.5Mbps). Bitrate 0 indicates the encoder should not use
-          bitrate control (the encoder is limited by the quality only).
+          17000000 (17Mbps) if not specified. The maximum value depends on the
+          selected `H.264 level`_ and profile. Bitrate 0 indicates the encoder
+          should not use bitrate control (the encoder is limited by the quality
+          only).
 
         * *quality* - Specifies the quality that the encoder should attempt
           to maintain. For the ``'h264'`` format, use values between 10 and 40
@@ -1002,6 +1031,8 @@ class PiCamera(object):
 
         .. versionchanged:: 1.11
             Support for buffer outputs was added.
+
+        .. _H.264 level: https://en.wikipedia.org/wiki/H.264/MPEG-4_AVC#Levels
         """
         if 'quantization' in options:
             warnings.warn(
@@ -1308,8 +1339,8 @@ class PiCamera(object):
         specifies the port of the video splitter that the image encoder will be
         attached to. This defaults to ``0`` and most users will have no need to
         specify anything different. This parameter is ignored when
-        *use_video_port* is ``False``. See :ref:`under_the_hood` for more
-        information about the video splitter.
+        *use_video_port* is ``False``. See :ref:`mmal` for more information
+        about the video splitter.
 
         If *resize* is not ``None`` (the default), it must be a two-element
         tuple specifying the width and height that the image should be resized
@@ -1328,6 +1359,10 @@ class PiCamera(object):
         * *quality* - Defines the quality of the JPEG encoder as an integer
           ranging from 1 to 100. Defaults to 85. Please note that JPEG quality
           is not a percentage and `definitions of quality`_ vary widely.
+
+        * *restart* - Defines the restart interval for the JPEG encoder as a
+          number of JPEG MCUs. The actual restart interval used will be a
+          multiple of the number of MCUs per row in the resulting image.
 
         * *thumbnail* - Defines the size and quality of the thumbnail to embed
           in the Exif metadata. Specifying ``None`` disables thumbnail
@@ -1521,6 +1556,8 @@ class PiCamera(object):
         The table below contains several example values of *output* and the
         sequence of filenames those values could produce:
 
+        .. tabularcolumns:: |p{80mm}|p{40mm}|p{10mm}|
+
         +--------------------------------------------+--------------------------------------------+-------+
         | *output* Value                             | Filenames                                  | Notes |
         +============================================+============================================+=======+
@@ -1579,7 +1616,8 @@ class PiCamera(object):
             with picamera.PiCamera() as camera:
                 camera.start_preview()
                 try:
-                    for i, filename in enumerate(camera.capture_continuous('image{counter:02d}.jpg')):
+                    for i, filename in enumerate(
+                            camera.capture_continuous('image{counter:02d}.jpg')):
                         print(filename)
                         time.sleep(1)
                         if i == 59:
@@ -1706,6 +1744,15 @@ class PiCamera(object):
                 'PiCamera.previewing is deprecated; test PiCamera.preview '
                 'is not None instead'))
         return isinstance(self._preview, PiPreviewRenderer)
+
+    @property
+    def revision(self):
+        """
+        Returns a string representing the revision of the Pi's camera module.
+        At the time of writing, the string returned is 'ov5647' for the V1
+        module, and 'imx219' for the V2 module.
+        """
+        return self._revision
 
     @property
     def exif_tags(self):
@@ -1839,7 +1886,7 @@ class PiCamera(object):
             in `config.txt`_ (this has the added advantage that sudo privileges
             and GPIO access are not required, at least for LED control).
 
-        .. _config.txt: http://www.raspberrypi.org/documentation/configuration/config-txt.md
+        .. _config.txt: https://www.raspberrypi.org/documentation/configuration/config-txt.md
         """)
 
     def _get_raw_format(self):
@@ -1916,9 +1963,9 @@ class PiCamera(object):
         An internal method for disabling the camera, e.g. for re-configuration.
         This disables the splitter and preview connections (if they exist).
         """
-        self._splitter.connection.enabled = False
-        self._preview.renderer.connection.enabled = False
-        self._camera.enabled = False
+        self._splitter.connection.disable()
+        self._preview.renderer.connection.disable()
+        self._camera.disable()
 
     def _enable_camera(self):
         """
@@ -1926,9 +1973,9 @@ class PiCamera(object):
         This ensures the splitter configuration is consistent, then re-enables
         the camera along with the splitter and preview connections.
         """
-        self._camera.enabled = True
-        self._preview.renderer.connection.enabled = True
-        self._splitter.connection.enabled = True
+        self._camera.enable()
+        self._preview.renderer.connection.enable()
+        self._splitter.connection.enable()
 
     def _configure_splitter(self):
         """
@@ -1974,7 +2021,7 @@ class PiCamera(object):
             (port.framesize, port.framerate, port.params[mmal.MMAL_PARAMETER_FPS_RANGE])
             for port in self._camera.outputs
             ]
-        if old_sensor_mode != 0 and sensor_mode != 0:
+        if old_sensor_mode != 0 or sensor_mode != 0:
             self._camera.control.params[mmal.MMAL_PARAMETER_CAMERA_CUSTOM_SENSOR_CONFIG] = sensor_mode
         if not self._camera.control.enabled:
             # Initial setup
@@ -1988,30 +2035,13 @@ class PiCamera(object):
         else:
             preview_resolution = self._camera.outputs[self.CAMERA_PREVIEW_PORT].framesize
         try:
-            cc = self._camera_config
-            cc.max_stills_w = resolution.width
-            cc.max_stills_h = resolution.height
-            cc.stills_yuv422 = 0
-            cc.one_shot_stills = 1
-            cc.max_preview_video_w = resolution.width
-            cc.max_preview_video_h = resolution.height
-            cc.num_preview_video_frames = max(3, framerate // 10)
-            cc.stills_capture_circular_buffer_height = 0
-            cc.fast_preview_resume = 0
-            cc.use_stc_timestamp = clock_mode
-            self._camera.control.params[mmal.MMAL_PARAMETER_CAMERA_CONFIG] = cc
-
-            # Determine the FPS range for the requested framerate
-            if framerate >= 1.0:
-                fps_low = 1
-                fps_high = framerate
-            elif framerate >= 0.166:
-                fps_low = Fraction(166, 1000)
-                fps_high = Fraction(999, 1000)
+            try:
+                fps_low, fps_high = framerate
+            except TypeError:
+                fps_low = fps_high = framerate
             else:
-                fps_low = Fraction(50, 1000)
-                fps_high = Fraction(166, 1000)
-            mp = mmal.MMAL_PARAMETER_FPS_RANGE_T(
+                framerate = 0
+            fps_range = mmal.MMAL_PARAMETER_FPS_RANGE_T(
                 mmal.MMAL_PARAMETER_HEADER_T(
                     mmal.MMAL_PARAMETER_FPS_RANGE,
                     ct.sizeof(mmal.MMAL_PARAMETER_FPS_RANGE_T)
@@ -2019,21 +2049,33 @@ class PiCamera(object):
                 fps_low=mo.to_rational(fps_low),
                 fps_high=mo.to_rational(fps_high),
                 )
+
+            cc = self._camera_config
+            cc.max_stills_w = resolution.width
+            cc.max_stills_h = resolution.height
+            cc.stills_yuv422 = 0
+            cc.one_shot_stills = 1
+            cc.max_preview_video_w = resolution.width
+            cc.max_preview_video_h = resolution.height
+            cc.num_preview_video_frames = max(3, fps_high // 10)
+            cc.stills_capture_circular_buffer_height = 0
+            cc.fast_preview_resume = 0
+            cc.use_stc_timestamp = clock_mode
+            self._camera.control.params[mmal.MMAL_PARAMETER_CAMERA_CONFIG] = cc
+
+            # Clamp preview resolution to camera's resolution
             if (
                     preview_resolution.width > resolution.width or
                     preview_resolution.height > resolution.height
                     ):
                 preview_resolution = resolution
             for port in self._camera.outputs:
-                port.params[mmal.MMAL_PARAMETER_FPS_RANGE] = mp
+                port.params[mmal.MMAL_PARAMETER_FPS_RANGE] = fps_range
                 if port.index == self.CAMERA_PREVIEW_PORT:
                     port.framesize = preview_resolution
                 else:
                     port.framesize = resolution
-                if framerate < 1:
-                    port.framerate = 0
-                else:
-                    port.framerate = framerate
+                port.framerate = framerate
                 port.commit()
         except:
             # If anything goes wrong, restore original resolution and
@@ -2060,7 +2102,7 @@ class PiCamera(object):
         self._check_camera_open()
         self._check_recording_stopped()
         value = mo.to_fraction(value, den_limit=256)
-        if not (0 <= value <= self.MAX_FRAMERATE):
+        if not (0 < value <= self.MAX_FRAMERATE):
             raise PiCameraValueError("Invalid framerate: %.2ffps" % value)
         sensor_mode = self.sensor_mode
         clock_mode = self.CLOCK_MODES[self.clock_mode]
@@ -2077,8 +2119,10 @@ class PiCamera(object):
 
         When queried, the :attr:`framerate` property returns the rate at which
         the camera's video and preview ports will operate as a
-        :class:`~fractions.Fraction` instance which can be easily converted to
-        an :class:`int` or :class:`float`.
+        :class:`~fractions.Fraction` instance (which can be easily converted to
+        an :class:`int` or :class:`float`). If :attr:`framerate_range` has been
+        set, then :attr:`framerate` will be 0 which indicates that a dynamic
+        range of framerates is being used.
 
         .. note::
 
@@ -2092,11 +2136,12 @@ class PiCamera(object):
             accurate and also permits direct use with math operators).
 
         When set, the property configures the camera so that the next call to
-        recording and previewing methods will use the new framerate.  The
-        framerate can be specified as an :ref:`int <typesnumeric>`, :ref:`float
-        <typesnumeric>`, :class:`~fractions.Fraction`, or a ``(numerator,
-        denominator)`` tuple. For example, the following definitions are all
-        equivalent::
+        recording and previewing methods will use the new framerate. Setting
+        this property implicitly sets :attr:`framerate_range` so that the low
+        and high values are equal to the new framerate. The framerate can be
+        specified as an :ref:`int <typesnumeric>`, :ref:`float <typesnumeric>`,
+        :class:`~fractions.Fraction`, or a ``(numerator, denominator)`` tuple.
+        For example, the following definitions are all equivalent::
 
             from fractions import Fraction
 
@@ -2136,7 +2181,9 @@ class PiCamera(object):
         sensor_mode = self.sensor_mode
         clock_mode = self.CLOCK_MODES[self.clock_mode]
         resolution = self.resolution
-        framerate = self.framerate
+        framerate = Fraction(self.framerate)
+        if framerate == 0:
+            framerate = self.framerate_range
         self._disable_camera()
         self._configure_camera(
             old_sensor_mode=sensor_mode, sensor_mode=value,
@@ -2181,7 +2228,9 @@ class PiCamera(object):
         except KeyError:
             raise PiCameraValueError("Invalid clock mode %s" % value)
         sensor_mode = self.sensor_mode
-        framerate = self.framerate
+        framerate = Fraction(self.framerate)
+        if framerate == 0:
+            framerate = self.framerate_range
         resolution = self.resolution
         self._disable_camera()
         self._configure_camera(
@@ -2207,7 +2256,7 @@ class PiCamera(object):
 
     def _get_resolution(self):
         self._check_camera_open()
-        return mo.PiCameraResolution(
+        return mo.PiResolution(
             int(self._camera_config.max_stills_w),
             int(self._camera_config.max_stills_h)
             )
@@ -2222,7 +2271,9 @@ class PiCamera(object):
                     "Invalid resolution requested: %r" % (value,))
         sensor_mode = self.sensor_mode
         clock_mode = self.CLOCK_MODES[self.clock_mode]
-        framerate = self.framerate
+        framerate = Fraction(self.framerate)
+        if framerate == 0:
+            framerate = self.framerate_range
         self._disable_camera()
         self._configure_camera(
             sensor_mode=sensor_mode, framerate=framerate,
@@ -2275,8 +2326,87 @@ class PiCamera(object):
         .. _display resolution: https://en.wikipedia.org/wiki/Graphics_display_resolution
         """)
 
+    def _get_framerate_range(self):
+        self._check_camera_open()
+        port_num = (
+            self.CAMERA_VIDEO_PORT
+            if self._encoders else
+            self.CAMERA_PREVIEW_PORT
+            )
+        mp = self._camera.outputs[port_num].params[mmal.MMAL_PARAMETER_FPS_RANGE]
+        return mo.PiFramerateRange(
+            mo.to_fraction(mp.fps_low), mo.to_fraction(mp.fps_high))
+    def _set_framerate_range(self, value):
+        self._check_camera_open()
+        self._check_recording_stopped()
+        low, high = value
+        low = mo.to_fraction(low, den_limit=256)
+        high = mo.to_fraction(high, den_limit=256)
+        if not (0 < low <= self.MAX_FRAMERATE):
+            raise PiCameraValueError("Invalid low framerate: %.2ffps" % low)
+        if not (0 < high <= self.MAX_FRAMERATE):
+            raise PiCameraValueError("Invalid high framerate: %.2ffps" % high)
+        if high < low:
+            raise PiCameraValueError("framerate_range is backwards")
+        sensor_mode = self.sensor_mode
+        clock_mode = self.CLOCK_MODES[self.clock_mode]
+        resolution = self.resolution
+        self._disable_camera()
+        self._configure_camera(
+            sensor_mode=sensor_mode, framerate=(low, high),
+            resolution=resolution, clock_mode=clock_mode)
+        self._configure_splitter()
+        self._enable_camera()
+    framerate_range = property(_get_framerate_range, _set_framerate_range, doc="""\
+        Retrieves or sets a range between which the camera's framerate is
+        allowed to float.
+
+        When queried, the :attr:`framerate_range` property returns a
+        :func:`~collections.namedtuple` derivative with ``low`` and ``high``
+        components (index 0 and 1 respectively) which specify the limits of the
+        permitted framerate range.
+
+        When set, the property configures the camera so that the next call to
+        recording and previewing methods will use the new framerate range.
+        Setting this property will implicitly set the :attr:`framerate`
+        property to 0 (indicating that a dynamic range of framerates is in use
+        by the camera).
+
+        .. note::
+
+            Use of this property prevents use of :attr:`framerate_delta` (there
+            would be little point in making fractional adjustments to the
+            framerate when the framerate itself is variable).
+
+        The low and high framerates can be specified as :ref:`int
+        <typesnumeric>`, :ref:`float <typesnumeric>`, or
+        :class:`~fractions.Fraction` values. For example, the following
+        definitions are all equivalent::
+
+            from fractions import Fraction
+
+            camera.framerate_range = (0.16666, 30)
+            camera.framerate_range = (Fraction(1, 6), 30 / 1)
+            camera.framerate_range = (Fraction(1, 6), Fraction(30, 1))
+
+        The camera must not be closed, and no recording must be active when the
+        property is set.
+
+        .. note::
+
+            This attribute, like :attr:`framerate`, determines the mode that
+            the camera operates in. The actual sensor framerate and resolution
+            used by the camera is influenced, but not directly set, by this
+            property. See :attr:`sensor_mode` for more information.
+
+        .. versionadded:: 1.13
+        """)
+
     def _get_framerate_delta(self):
         self._check_camera_open()
+        if self.framerate == 0:
+            raise PiCameraValueError(
+                'framerate_delta cannot be used with framerate_range')
         port_num = (
             self.CAMERA_VIDEO_PORT
             if self._encoders else
@@ -2285,6 +2415,9 @@ class PiCamera(object):
         return self._camera.outputs[port_num].params[mmal.MMAL_PARAMETER_FRAME_RATE] - self.framerate
     def _set_framerate_delta(self, value):
         self._check_camera_open()
+        if self.framerate == 0:
+            raise PiCameraValueError(
+                'framerate_delta cannot be used with framerate_range')
         value = mo.to_fraction(self.framerate + value, den_limit=256)
         self._camera.outputs[self.CAMERA_PREVIEW_PORT].params[mmal.MMAL_PARAMETER_FRAME_RATE] = value
         self._camera.outputs[self.CAMERA_VIDEO_PORT].params[mmal.MMAL_PARAMETER_FRAME_RATE] = value
@@ -2329,7 +2462,14 @@ class PiCamera(object):
 
         .. note::
 
-            This property is reset to 0 when :attr:`framerate` is set.
+            This property is implicitly reset to 0 when :attr:`framerate` or
+            :attr:`framerate_range` is set. When :attr:`framerate` is 0
+            (indicating that :attr:`framerate_range` is set), this property
+            cannot be used.  (there would be little point in making fractional
+            adjustments to the framerate when the framerate itself is
+            variable).
+
+        .. versionadded:: 1.11
         """)
 
     def _get_still_stats(self):
@@ -2359,6 +2499,13 @@ class PiCamera(object):
         (automatic gain control) has to converge. The downside is that
         processing time for captures increases and that white balance and gain
         won't necessarily match the preview.
+
+        .. warning::
+
+            Enabling the still statistics pass will `override fixed white
+            balance`_ gains (set via :attr:`awb_gains` and :attr:`awb_mode`).
+
+        .. _override fixed white balance: https://www.raspberrypi.org/forums/viewtopic.php?p=875772&sid=92fa4ea70d1fe24590a4cdfb4a10c489#p875772
 
         .. versionadded:: 1.9
         """)
@@ -2590,7 +2737,13 @@ class PiCamera(object):
         The default value is ``'off'``. All possible values for the attribute
         can be obtained from the ``PiCamera.DRC_STRENGTHS`` attribute.
 
-        .. _dynamic range compression: http://en.wikipedia.org/wiki/Gain_compression
+        .. warning::
+
+            Enabling DRC will `override fixed white balance`_ gains (set via
+            :attr:`awb_gains` and :attr:`awb_mode`).
+
+        .. _dynamic range compression: https://en.wikipedia.org/wiki/Gain_compression
+        .. _override fixed white balance: https://www.raspberrypi.org/forums/viewtopic.php?p=875772&sid=92fa4ea70d1fe24590a4cdfb4a10c489#p875772
 
         .. versionadded:: 1.6
         """.format(values=docstring_values(DRC_STRENGTHS)))
@@ -2633,26 +2786,25 @@ class PiCamera(object):
         values (e.g. 400 or 800). Lower sensitivities tend to produce less
         "noisy" (smoother) images, but operate poorly in low light conditions.
 
-        When set, the property adjusts the sensitivity of the camera. Valid
+        When set, the property adjusts the sensitivity of the camera (by
+        adjusting the :attr:`analog_gain` and :attr:`digital_gain`). Valid
         values are between 0 (auto) and 1600. The actual value used when iso is
         explicitly set will be one of the following values (whichever is
         closest): 100, 200, 320, 400, 500, 640, 800.
 
+        On the V1 camera module, non-zero ISO values attempt to fix overall
+        gain at various levels. For example, ISO 100 attempts to provide an
+        overall gain of 1.0, ISO 200 attempts to provide overall gain of 2.0,
+        etc. The algorithm prefers analog gain over digital gain to reduce
+        noise.
+
+        On the V2 camera module, ISO 100 attempts to produce overall gain of
+        ~1.84, and ISO 800 attempts to produce overall gain of ~14.72 (the V2
+        camera module was calibrated against the `ISO film speed`_ standard).
+
         The attribute can be adjusted while previews or recordings are in
         progress. The default value is 0 which means automatically determine a
         value according to image-taking conditions.
-
-        .. note::
-
-            You can query the :attr:`analog_gain` and :attr:`digital_gain`
-            attributes to determine the actual gains being used by the camera.
-            If both are 1.0 this equates to ISO 100.  Please note that this
-            capability requires an up to date firmware (#692 or later).
-
-        .. note::
-
-            With iso settings other than 0 (auto), the :attr:`exposure_mode`
-            property becomes non-functional.
 
         .. note::
 
@@ -2664,8 +2816,15 @@ class PiCamera(object):
             will permit settings up to 1600 in case the underlying firmware
             permits such settings in particular circumstances.
 
+        .. note::
 
-        .. _sensitivity of the camera to light: http://en.wikipedia.org/wiki/Film_speed#Digital
+            Certain :attr:`exposure_mode` values override the ISO setting. For
+            example, ``'off'`` fixes :attr:`analog_gain` and
+            :attr:`digital_gain` entirely, preventing this property from
+            adjusting them when set.
+
+        .. _sensitivity of the camera to light: https://en.wikipedia.org/wiki/Film_speed#Digital
+        .. _ISO film speed: https://en.wikipedia.org/wiki/Film_speed#Current_system:_ISO
         """)
 
     def _get_meter_mode(self):
@@ -2700,8 +2859,8 @@ class PiCamera(object):
         The default value is ``'average'``. All possible values for the
         attribute can be obtained from the ``PiCamera.METER_MODES`` attribute.
 
-        .. _determines the exposure: http://en.wikipedia.org/wiki/Metering_mode
-        .. _difference between each mode: http://www.raspberrypi.org/forums/viewtopic.php?p=565644#p565644
+        .. _determines the exposure: https://en.wikipedia.org/wiki/Metering_mode
+        .. _difference between each mode: https://www.raspberrypi.org/forums/viewtopic.php?p=565644#p565644
         """.format(values=docstring_values(METER_MODES)))
 
     def _get_video_stabilization(self):
@@ -2727,7 +2886,7 @@ class PiCamera(object):
             The built-in video stabilization only accounts for `vertical and
             horizontal motion`_, not rotation.
 
-        .. _vertical and horizontal motion: http://www.raspberrypi.org/phpBB3/viewtopic.php?p=342667&sid=ec7d95e887ab74a90ffaab87888c48cd#p342667
+        .. _vertical and horizontal motion: https://www.raspberrypi.org/forums/viewtopic.php?p=342667&sid=ec7d95e887ab74a90ffaab87888c48cd#p342667
         """)
 
     def _get_exposure_compensation(self):
@@ -2789,11 +2948,14 @@ class PiCamera(object):
 
             Exposure mode ``'off'`` is special: this disables the camera's
             automatic gain control, fixing the values of :attr:`digital_gain`
-            and :attr:`analog_gain`. Please note that these properties are not
-            directly settable, and default to low values when the camera is
+            and :attr:`analog_gain`.
+
+            Please note that these properties are not directly settable
+            (although they can be influenced by setting :attr:`iso` *prior* to
+            fixing the gains), and default to low values when the camera is
             first initialized. Therefore it is important to let them settle on
-            higher values before disabling automatic gain control otherwise
-            all frames captured will appear black.
+            higher values before disabling automatic gain control otherwise all
+            frames captured will appear black.
         """.format(values=docstring_values(EXPOSURE_MODES)))
 
     def _get_flash_mode(self):
@@ -2833,7 +2995,7 @@ class PiCamera(object):
             information can be found in this :ref:`recipe
             <flash_configuration>`.
 
-        .. _Device Tree configuration: http://www.raspberrypi.org/documentation/configuration/pin-configuration.md
+        .. _Device Tree configuration: https://www.raspberrypi.org/documentation/configuration/pin-configuration.md
 
         .. versionadded:: 1.10
         """.format(values=docstring_values(FLASH_MODES)))
@@ -2869,7 +3031,9 @@ class PiCamera(object):
 
             AWB mode ``'off'`` is special: this disables the camera's automatic
             white balance permitting manual control of the white balance via
-            the :attr:`awb_gains` property.
+            the :attr:`awb_gains` property. However, even with AWB disabled,
+            some attributes (specifically :attr:`still_stats` and
+            :attr:`drc_strength`) can cause AWB re-calculations.
         """.format(values=docstring_values(AWB_MODES)))
 
     def _get_awb_gains(self):
@@ -2918,7 +3082,9 @@ class PiCamera(object):
         .. note::
 
             This attribute only has an effect when :attr:`awb_mode` is set to
-            ``'off'``.
+            ``'off'``. Also note that even with AWB disabled, some attributes
+            (specifically :attr:`still_stats` and :attr:`drc_strength`) can
+            cause AWB re-calculations.
 
         .. versionchanged:: 1.6
             Prior to version 1.6, this attribute was write-only.
@@ -3042,6 +3208,8 @@ class PiCamera(object):
 
         The effects which have parameters, and what combinations those
         parameters can take is as follows:
+
+        .. tabularcolumns:: |p{30mm}|p{25mm}|p{75mm}|
 
         +--------------------+----------------+-----------------------------------------+
         | Effect             | Parameters     | Description                             |
@@ -3172,24 +3340,18 @@ class PiCamera(object):
 
     def _get_vflip(self):
         self._check_camera_open()
-        mp = self._camera.outputs[0].params[mmal.MMAL_PARAMETER_MIRROR]
-        return mp.value in (mmal.MMAL_PARAM_MIRROR_VERTICAL, mmal.MMAL_PARAM_MIRROR_BOTH)
+        return self._camera.outputs[0].params[mmal.MMAL_PARAMETER_MIRROR] in (
+            mmal.MMAL_PARAM_MIRROR_VERTICAL, mmal.MMAL_PARAM_MIRROR_BOTH)
     def _set_vflip(self, value):
         self._check_camera_open()
-        mp = mmal.MMAL_PARAMETER_MIRROR_T(
-            mmal.MMAL_PARAMETER_HEADER_T(
-                mmal.MMAL_PARAMETER_MIRROR,
-                ct.sizeof(mmal.MMAL_PARAMETER_MIRROR_T)
-                ),
-            {
-                (False, False): mmal.MMAL_PARAM_MIRROR_NONE,
-                (True,  False): mmal.MMAL_PARAM_MIRROR_VERTICAL,
-                (False, True):  mmal.MMAL_PARAM_MIRROR_HORIZONTAL,
-                (True,  True):  mmal.MMAL_PARAM_MIRROR_BOTH,
-                }[(bool(value), self.hflip)]
-            )
+        value = {
+            (False, False): mmal.MMAL_PARAM_MIRROR_NONE,
+            (True,  False): mmal.MMAL_PARAM_MIRROR_VERTICAL,
+            (False, True):  mmal.MMAL_PARAM_MIRROR_HORIZONTAL,
+            (True,  True):  mmal.MMAL_PARAM_MIRROR_BOTH,
+            }[(bool(value), self.hflip)]
         for port in self._camera.outputs:
-            port.params[mmal.MMAL_PARAMETER_MIRROR] = mp
+            port.params[mmal.MMAL_PARAMETER_MIRROR] = value
     vflip = property(_get_vflip, _set_vflip, doc="""\
         Retrieves or sets whether the camera's output is vertically flipped.
 
@@ -3201,24 +3363,18 @@ class PiCamera(object):
 
     def _get_hflip(self):
         self._check_camera_open()
-        mp = self._camera.outputs[0].params[mmal.MMAL_PARAMETER_MIRROR]
-        return mp.value in (mmal.MMAL_PARAM_MIRROR_HORIZONTAL, mmal.MMAL_PARAM_MIRROR_BOTH)
+        return self._camera.outputs[0].params[mmal.MMAL_PARAMETER_MIRROR] in (
+            mmal.MMAL_PARAM_MIRROR_HORIZONTAL, mmal.MMAL_PARAM_MIRROR_BOTH)
     def _set_hflip(self, value):
         self._check_camera_open()
-        mp = mmal.MMAL_PARAMETER_MIRROR_T(
-            mmal.MMAL_PARAMETER_HEADER_T(
-                mmal.MMAL_PARAMETER_MIRROR,
-                ct.sizeof(mmal.MMAL_PARAMETER_MIRROR_T)
-                ),
-            {
-                (False, False): mmal.MMAL_PARAM_MIRROR_NONE,
-                (True,  False): mmal.MMAL_PARAM_MIRROR_VERTICAL,
-                (False, True):  mmal.MMAL_PARAM_MIRROR_HORIZONTAL,
-                (True,  True):  mmal.MMAL_PARAM_MIRROR_BOTH,
-                }[(self.vflip, bool(value))]
-            )
+        value = {
+            (False, False): mmal.MMAL_PARAM_MIRROR_NONE,
+            (True,  False): mmal.MMAL_PARAM_MIRROR_VERTICAL,
+            (False, True):  mmal.MMAL_PARAM_MIRROR_HORIZONTAL,
+            (True,  True):  mmal.MMAL_PARAM_MIRROR_BOTH,
+            }[(self.vflip, bool(value))]
         for port in self._camera.outputs:
-            port.params[mmal.MMAL_PARAMETER_MIRROR] = mp
+            port.params[mmal.MMAL_PARAMETER_MIRROR] = value
     hflip = property(_get_hflip, _set_hflip, doc="""\
         Retrieves or sets whether the camera's output is horizontally flipped.
 

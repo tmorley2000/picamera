@@ -1,7 +1,7 @@
 # vim: set et sw=4 sts=4 fileencoding=utf-8:
 #
 # Python camera library for the Rasperry-Pi camera module
-# Copyright (c) 2013-2015 Dave Jones <dave@waveform.org.uk>
+# Copyright (c) 2013-2017 Dave Jones <dave@waveform.org.uk>
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions are met:
@@ -34,7 +34,7 @@ from __future__ import (
     absolute_import,
     )
 
-# Make Py2's str and range equivalent to Py3's
+# Make Py2's str equivalent to Py3's
 str = type('')
 
 import ctypes as ct
@@ -88,7 +88,7 @@ class PiRenderer(object):
             self.rotation = rotation
             self.vflip = vflip
             self.hflip = hflip
-            self.renderer.enabled = True
+            self.renderer.enable()
         except:
             self.renderer.close()
             raise
@@ -131,6 +131,11 @@ class PiRenderer(object):
         255 indicating the opacity of the renderer, where 0 is completely
         transparent and 255 is completely opaque. The default value is 255. The
         property can be set while recordings or previews are in progress.
+
+        .. note::
+
+            If the renderer is being fed RGBA data (as in partially transparent
+            overlays), the alpha property will be ignored.
         """)
 
     def _get_layer(self):
@@ -342,47 +347,81 @@ class PiOverlayRenderer(PiRenderer):
     Represents an :class:`~mmalobj.MMALRenderer` with a static source for
     overlays.
 
-    This class descends from :class:`PiRenderer` and adds a static source for
-    the :class:`~mmalobj.MMALRenderer`. The optional *resolution* parameter
-    specifies the size of the source image as a ``(width, height)`` tuple. If
-    this is omitted or ``None`` then the resolution is assumed to be the same
-    as the parent camera's current :attr:`~PiCamera.resolution`.
+    This class descends from :class:`PiRenderer` and adds a static *source* for
+    the :class:`~mmalobj.MMALRenderer`. The *source* must be an object that
+    supports the :ref:`buffer protocol <bufferobjects>` in one of the supported
+    formats.
 
-    The *source* must be an object that supports the :ref:`buffer protocol
-    <bufferobjects>` which has the same length as an image in `RGB`_ format
-    (colors represented as interleaved unsigned bytes) with the specified
-    *resolution* after the width has been rounded up to the nearest multiple of
-    32, and the height has been rounded up to the nearest multiple of 16.
+    The optional *resolution* parameter specifies the size of the *source* as a
+    ``(width, height)`` tuple. If this is omitted or ``None`` then the
+    resolution is assumed to be the same as the parent camera's current
+    :attr:`~PiCamera.resolution`. The optional *format* parameter specifies the
+    encoding of the *source*. This can be one of the unencoded formats:
+    ``'yuv'``, ``'rgb'``, ``'rgba'``, ``'bgr'``, or ``'bgra'``. If omitted or
+    ``None``, *format* will be guessed based on the size of *source* (assuming
+    3 bytes for `RGB`_, and 4 bytes for `RGBA`_).
 
-    For example, if *resolution* is ``(1280, 720)``, then *source* must be a
-    buffer with length 1280 x 720 x 3 bytes, or 2,764,800 bytes (because 1280
-    is a multiple of 32, and 720 is a multiple of 16 no extra rounding is
-    required).  However, if *resolution* is ``(97, 57)``, then *source* must be
-    a buffer with length 128 x 64 x 3 bytes, or 24,576 bytes (pixels beyond
-    column 97 and row 57 in the source will be ignored).
+    The length of *source* must take into account that widths are rounded up to
+    the nearest multiple of 32, and heights to the nearest multiple of 16.  For
+    example, if *resolution* is ``(1280, 720)``, and *format* is ``'rgb'`` then
+    *source* must be a buffer with length 1280 x 720 x 3 bytes, or 2,764,800
+    bytes (because 1280 is a multiple of 32, and 720 is a multiple of 16 no
+    extra rounding is required).  However, if *resolution* is ``(97, 57)``, and
+    *format* is ``'rgb'`` then *source* must be a buffer with length 128 x 64 x
+    3 bytes, or 24,576 bytes (pixels beyond column 97 and row 57 in the source
+    will be ignored).
 
     The *layer*, *alpha*, *fullscreen*, and *window* parameters are the same
     as in :class:`PiRenderer`.
 
-    .. _RGB: http://en.wikipedia.org/wiki/RGB
+    .. _RGB: https://en.wikipedia.org/wiki/RGB
+    .. _RGBA: https://en.wikipedia.org/wiki/RGBA_color_space
+
+    .. versionchanged:: 1.13
+        Added *format* parameter
     """
 
+    SOURCE_BPP = {
+        3: 'rgb',
+        4: 'rgba',
+        }
+
+    SOURCE_ENCODINGS = {
+        'yuv':  mmal.MMAL_ENCODING_I420,
+        'rgb':  mmal.MMAL_ENCODING_RGB24,
+        'rgba': mmal.MMAL_ENCODING_RGBA,
+        'bgr':  mmal.MMAL_ENCODING_BGR24,
+        'bgra': mmal.MMAL_ENCODING_BGRA,
+        }
+
     def __init__(
-            self, parent, source, resolution=None, layer=0, alpha=255,
-            fullscreen=True, window=None, crop=None, rotation=0, vflip=False,
-            hflip=False):
+            self, parent, source, resolution=None, format=None, layer=0,
+            alpha=255, fullscreen=True, window=None, crop=None, rotation=0,
+            vflip=False, hflip=False):
         super(PiOverlayRenderer, self).__init__(
             parent, layer, alpha, fullscreen, window, crop,
             rotation, vflip, hflip)
 
         # Copy format from camera's preview port, then adjust the encoding to
-        # RGB888 and optionally adjust the resolution and size
-        self.renderer.inputs[0].format = mmal.MMAL_ENCODING_RGB24
+        # RGB888 or RGBA and optionally adjust the resolution and size
         if resolution is not None:
             self.renderer.inputs[0].framesize = resolution
         else:
             self.renderer.inputs[0].framesize = parent.resolution
         self.renderer.inputs[0].framerate = 0
+        if format is None:
+            source_len = mo.buffer_bytes(source)
+            plane_size = self.renderer.inputs[0].framesize.pad()
+            plane_len = plane_size.width * plane_size.height
+            try:
+                format = self.SOURCE_BPP[source_len // plane_len]
+            except KeyError:
+                raise PiCameraValueError(
+                    'unable to determine format from source size')
+        try:
+            self.renderer.inputs[0].format = self.SOURCE_ENCODINGS[format]
+        except KeyError:
+            raise PiCameraValueError('unknown format %s' % format)
         self.renderer.inputs[0].commit()
         # The following callback is required to prevent the mmalobj layer
         # automatically passing buffers back to the port
@@ -397,9 +436,16 @@ class PiOverlayRenderer(PiRenderer):
         used to create the overlay. There is currently no method for changing
         the size of an existing overlay (remove and recreate the overlay if you
         require this).
+
+        .. note::
+
+            If you repeatedly update an overlay renderer, you must make sure
+            that you do so at a rate equal to, or slower than, the camera's
+            framerate. Going faster will rapidly starve the renderer's pool of
+            buffers leading to a runtime error.
         """
-        buf = self.renderer.inputs[0].pool.get_buffer()
-        buf.update(source)
+        buf = self.renderer.inputs[0].get_buffer()
+        buf.data = source
         self.renderer.inputs[0].send_buffer(buf)
 
 
@@ -428,7 +474,7 @@ class PiPreviewRenderer(PiRenderer):
         if resolution is not None:
             resolution = mo.to_resolution(resolution)
             source.framesize = resolution
-        self.renderer.connect(source)
+        self.renderer.inputs[0].connect(source).enable()
 
     def _get_resolution(self):
         result = self._parent._camera.outputs[self._parent.CAMERA_PREVIEW_PORT].framesize
@@ -445,12 +491,12 @@ class PiPreviewRenderer(PiRenderer):
                 ):
             raise PiCameraValueError(
                 'preview resolution cannot exceed camera resolution')
-        self.renderer.connection.enabled = False
+        self.renderer.connection.disable()
         if value is None:
             value = self._parent.resolution
         self._parent._camera.outputs[self._parent.CAMERA_PREVIEW_PORT].framesize = value
         self._parent._camera.outputs[self._parent.CAMERA_PREVIEW_PORT].commit()
-        self.renderer.connection.enabled = True
+        self.renderer.connection.enable()
     resolution = property(_get_resolution, _set_resolution, doc="""\
         Retrieves or sets the resolution of the preview renderer.
 
@@ -508,8 +554,8 @@ class PiNullSink(object):
 
     def __init__(self, parent, source):
         self.renderer = mo.MMALNullSink()
-        self.renderer.enabled = True
-        self.renderer.connect(source)
+        self.renderer.enable()
+        self.renderer.inputs[0].connect(source).enable()
 
     def close(self):
         """

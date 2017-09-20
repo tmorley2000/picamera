@@ -1,7 +1,7 @@
 # vim: set et sw=4 sts=4 fileencoding=utf-8:
 #
 # Python camera library for the Rasperry-Pi camera module
-# Copyright (c) 2013-2015 Dave Jones <dave@waveform.org.uk>
+# Copyright (c) 2013-2017 Dave Jones <dave@waveform.org.uk>
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions are met:
@@ -118,6 +118,13 @@ class PiCameraValueError(PiCameraError, ValueError):
     """
 
 
+class PiCameraIOError(PiCameraError, IOError):
+    """
+    Raised when a :class:`~PiCamera` object is unable to perform an IO
+    operation.
+    """
+
+
 class PiCameraMMALError(PiCameraError):
     """
     Raised when an MMAL operation fails for whatever reason.
@@ -126,7 +133,7 @@ class PiCameraMMALError(PiCameraError):
         self.status = status
         PiCameraError.__init__(self, "%s%s%s" % (prefix, ": " if prefix else "", {
             mmal.MMAL_ENOMEM:    "Out of memory",
-            mmal.MMAL_ENOSPC:    "Out of resources (other than memory)",
+            mmal.MMAL_ENOSPC:    "Out of resources",
             mmal.MMAL_EINVAL:    "Argument is invalid",
             mmal.MMAL_ENOSYS:    "Function not implemented",
             mmal.MMAL_ENOENT:    "No such file or directory",
@@ -141,6 +148,26 @@ class PiCameraMMALError(PiCameraError):
             mmal.MMAL_EAGAIN:    "Resource temporarily unavailable; try again later",
             mmal.MMAL_EFAULT:    "Bad address",
             }.get(status, "Unknown status error")))
+
+
+class PiCameraPortDisabled(PiCameraMMALError):
+    """
+    Raised when attempting a buffer operation on a disabled port.
+
+    This exception is intended for the common use-case of attempting to get
+    or send a buffer just when a component is shutting down (e.g. at script
+    teardown) and simplifies the trivial response (ignore the error and shut
+    down quietly). For example::
+
+        def _callback(self, port, buf):
+            try:
+                buf = self.outputs[0].get_buffer(False)
+            except PiCameraPortDisabled:
+                return True # shutting down
+            # ...
+    """
+    def __init__(self, msg):
+        super(PiCameraPortDisabled, self).__init__(mmal.MMAL_EINVAL, msg)
 
 
 def mmal_check(status, prefix=""):

@@ -1,7 +1,7 @@
 # vim: set et sw=4 sts=4 fileencoding=utf-8:
 #
 # Python header conversion
-# Copyright (c) 2013-2015 Dave Jones <dave@waveform.org.uk>
+# Copyright (c) 2013-2017 Dave Jones <dave@waveform.org.uk>
 #
 # Original headers
 # Copyright (c) 2012, Broadcom Europe Ltd
@@ -44,17 +44,9 @@ str = type('')
 import ctypes as ct
 import warnings
 
+from .bcm_host import VCOS_UNSIGNED
+
 _lib = ct.CDLL('libmmal.so')
-
-# vcos_platform.h ############################################################
-
-VCOS_UNSIGNED = ct.c_uint32
-
-# vcos_types.h ###############################################################
-
-def VCOS_ALIGN_UP(value, round_to):
-    # Note: this function assumes round_to is some power of 2.
-    return (value + (round_to - 1)) & ~(round_to - 1)
 
 # mmal.h #####################################################################
 
@@ -72,6 +64,9 @@ def MMAL_VERSION_TO_MINOR(a):
 
 def MMAL_FOURCC(s):
     return sum(ord(c) << (i * 8) for (i, c) in enumerate(s))
+
+def FOURCC_str(n):
+    return ''.join(chr(n >> i & 0xFF) for i in range(0, 32, 8))
 
 MMAL_MAGIC = MMAL_FOURCC('mmal')
 
@@ -124,7 +119,7 @@ MMAL_STATUS_T = ct.c_uint32 # enum
     MMAL_ENOTCONN,
     MMAL_EAGAIN,
     MMAL_EFAULT,
-) = range(0, 16)
+) = range(16)
 MMAL_STATUS_MAX = 0x7FFFFFFF
 
 class MMAL_RECT_T(ct.Structure):
@@ -148,20 +143,9 @@ class MMAL_RATIONAL_T(ct.Structure):
     def __repr__(self):
         return '%d/%d' % (self.num, self.den)
 
-MMAL_TIME_UNKNOWN = ct.c_int64(1<<63)
+MMAL_TIME_UNKNOWN = ct.c_int64(1<<63).value
 
-class MMAL_FOURCC_T(ct.c_uint32):
-    def __eq__(self, other):
-        if isinstance(other, int):
-            return self.value == other
-        else:
-            return super(MMAL_FOURCC_T, self).__eq__(other)
-
-    def __str__(self):
-        return ''.join(chr(self.value >> i & 0xFF) for i in range(0, 32, 8))
-
-    def __repr__(self):
-        return "MMAL_FOURCC('%s')" % str(self)
+MMAL_FOURCC_T = ct.c_uint32
 
 # mmal_format.h ##############################################################
 
@@ -324,10 +308,11 @@ MMAL_BUFFER_HEADER_FLAG_CORRUPTED              = (1<<9)
 MMAL_BUFFER_HEADER_FLAG_TRANSMISSION_FAILED    = (1<<10)
 MMAL_BUFFER_HEADER_FLAG_DECODEONLY             = (1<<11)
 
-MMAL_BUFFER_HEADER_VIDEO_FLAG_INTERLACED       = (1<<0)
-MMAL_BUFFER_HEADER_VIDEO_FLAG_TOP_FIELD_FIRST  = (1<<2)
-MMAL_BUFFER_HEADER_VIDEO_FLAG_DISPLAY_EXTERNAL = (1<<3)
-MMAL_BUFFER_HEADER_VIDEO_FLAG_PROTECTED        = (1<<4)
+MMAL_BUFFER_HEADER_FLAG_FORMAT_SPECIFIC_START  = (1<<16)
+MMAL_BUFFER_HEADER_VIDEO_FLAG_INTERLACED       = (MMAL_BUFFER_HEADER_FLAG_FORMAT_SPECIFIC_START<<0)
+MMAL_BUFFER_HEADER_VIDEO_FLAG_TOP_FIELD_FIRST  = (MMAL_BUFFER_HEADER_FLAG_FORMAT_SPECIFIC_START<<1)
+MMAL_BUFFER_HEADER_VIDEO_FLAG_DISPLAY_EXTERNAL = (MMAL_BUFFER_HEADER_FLAG_FORMAT_SPECIFIC_START<<3)
+MMAL_BUFFER_HEADER_VIDEO_FLAG_PROTECTED        = (MMAL_BUFFER_HEADER_FLAG_FORMAT_SPECIFIC_START<<4)
 
 mmal_buffer_header_acquire = _lib.mmal_buffer_header_acquire
 mmal_buffer_header_acquire.argtypes = [ct.POINTER(MMAL_BUFFER_HEADER_T)]
@@ -631,7 +616,8 @@ class MMAL_PARAMETER_LOGGING_T(ct.Structure):
     MMAL_PARAMETER_CAMERA_RX_CONFIG,
     MMAL_PARAMETER_CAMERA_RX_TIMING,
     MMAL_PARAMETER_DPF_CONFIG,
-) = range(MMAL_PARAMETER_GROUP_CAMERA, MMAL_PARAMETER_GROUP_CAMERA + 80)
+    MMAL_PARAMETER_JPEG_RESTART_INTERVAL,
+) = range(MMAL_PARAMETER_GROUP_CAMERA, MMAL_PARAMETER_GROUP_CAMERA + 81)
 
 class MMAL_PARAMETER_THUMBNAIL_CONFIG_T(ct.Structure):
     _fields_ = [
@@ -1391,7 +1377,7 @@ class MMAL_PARAMETER_CAMERA_RX_TIMING_T(ct.Structure):
    MMAL_PARAMETER_VIDEO_RENDER_STATS,
    MMAL_PARAMETER_VIDEO_INTERLACE_TYPE,
    MMAL_PARAMETER_VIDEO_INTERPOLATE_TIMESTAMPS,
-   MMAL_PARAMETER_VIDEO_ENCODE_SPS_TIMINGS,
+   MMAL_PARAMETER_VIDEO_ENCODE_SPS_TIMING,
    MMAL_PARAMETER_VIDEO_MAX_NUM_CALLBACKS,
 ) = range(MMAL_PARAMETER_GROUP_VIDEO, MMAL_PARAMETER_GROUP_VIDEO + 50)
 
@@ -2183,18 +2169,34 @@ MMAL_ENCODING_VYUY            = MMAL_FOURCC('VYUY')
 MMAL_ENCODING_NV12            = MMAL_FOURCC('NV12')
 MMAL_ENCODING_NV21            = MMAL_FOURCC('NV21')
 MMAL_ENCODING_ARGB            = MMAL_FOURCC('ARGB')
+MMAL_ENCODING_ARGB_SLICE      = MMAL_FOURCC('argb')
 MMAL_ENCODING_RGBA            = MMAL_FOURCC('RGBA')
+MMAL_ENCODING_RGBA_SLICE      = MMAL_FOURCC('rgba')
 MMAL_ENCODING_ABGR            = MMAL_FOURCC('ABGR')
+MMAL_ENCODING_ABGR_SLICE      = MMAL_FOURCC('abgr')
 MMAL_ENCODING_BGRA            = MMAL_FOURCC('BGRA')
+MMAL_ENCODING_BGRA_SLICE      = MMAL_FOURCC('bgra')
 MMAL_ENCODING_RGB16           = MMAL_FOURCC('RGB2')
+MMAL_ENCODING_RGB16_SLICE     = MMAL_FOURCC('rgb2')
 MMAL_ENCODING_RGB24           = MMAL_FOURCC('RGB3')
+MMAL_ENCODING_RGB24_SLICE     = MMAL_FOURCC('rgb3')
 MMAL_ENCODING_RGB32           = MMAL_FOURCC('RGB4')
+MMAL_ENCODING_RGB32_SLICE     = MMAL_FOURCC('rgb4')
 MMAL_ENCODING_BGR16           = MMAL_FOURCC('BGR2')
+MMAL_ENCODING_BGR16_SLICE     = MMAL_FOURCC('bgr2')
 MMAL_ENCODING_BGR24           = MMAL_FOURCC('BGR3')
+MMAL_ENCODING_BGR24_SLICE     = MMAL_FOURCC('bgr3')
 MMAL_ENCODING_BGR32           = MMAL_FOURCC('BGR4')
+MMAL_ENCODING_BGR32_SLICE     = MMAL_FOURCC('bgr4')
 
 MMAL_ENCODING_BAYER_SBGGR10P  = MMAL_FOURCC('pBAA')
+MMAL_ENCODING_BAYER_SGRBG10P  = MMAL_FOURCC('pgAA')
+MMAL_ENCODING_BAYER_SGBRG10P  = MMAL_FOURCC('pGAA')
+MMAL_ENCODING_BAYER_SRGGB10P  = MMAL_FOURCC('PRAA')
 MMAL_ENCODING_BAYER_SBGGR8    = MMAL_FOURCC('BA81')
+MMAL_ENCODING_BAYER_SGBRG8    = MMAL_FOURCC('GBRG')
+MMAL_ENCODING_BAYER_SGRBG8    = MMAL_FOURCC('GRBG')
+MMAL_ENCODING_BAYER_SRGGB8    = MMAL_FOURCC('RGGB')
 MMAL_ENCODING_BAYER_SBGGR12P  = MMAL_FOURCC('BY12')
 MMAL_ENCODING_BAYER_SBGGR16   = MMAL_FOURCC('BYR2')
 MMAL_ENCODING_BAYER_SBGGR10DPCM8 = MMAL_FOURCC('bBA8')
@@ -2281,6 +2283,8 @@ MMAL_COMPONENT_DEFAULT_CAMERA_INFO     = b"vc.camera_info"
 # The following two components aren't in the MMAL headers, but do exist
 MMAL_COMPONENT_DEFAULT_NULL_SINK       = b"vc.null_sink"
 MMAL_COMPONENT_DEFAULT_RESIZER         = b"vc.ril.resize"
+MMAL_COMPONENT_DEFAULT_ISP             = b"vc.ril.isp"
+MMAL_COMPONENT_RAW_CAMERA              = b"vc.ril.rawcam"
 
 # util/mmal_util_params.h ####################################################
 

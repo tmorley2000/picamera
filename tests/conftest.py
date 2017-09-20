@@ -1,7 +1,7 @@
 # vim: set et sw=4 sts=4 fileencoding=utf-8:
 #
 # Python camera library for the Rasperry-Pi camera module
-# Copyright (c) 2013-2015 Dave Jones <dave@waveform.org.uk>
+# Copyright (c) 2013-2017 Dave Jones <dave@waveform.org.uk>
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions are met:
@@ -85,7 +85,7 @@ def mode(request, camera):
             camera.resolution = save_resolution
             camera.framerate = save_framerate
     request.addfinalizer(fin)
-    return request.param
+    return (picamera.PiResolution(*new_resolution), new_framerate)
 
 # A fixture for temporary directories which cleans them up immediately after
 # usage (the built-in tmpdir fixture only cleans up after several test runs

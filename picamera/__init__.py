@@ -1,7 +1,7 @@
 # vim: set et sw=4 sts=4 fileencoding=utf-8:
 #
 # Python camera library for the Rasperry-Pi camera module
-# Copyright (c) 2013-2015 Dave Jones <dave@waveform.org.uk>
+# Copyright (c) 2013-2017 Dave Jones <dave@waveform.org.uk>
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions are met:
@@ -82,9 +82,12 @@ from picamera.exc import (
     PiCameraAlreadyRecording,
     PiCameraValueError,
     PiCameraMMALError,
+    PiCameraPortDisabled,
     mmal_check,
     )
+from picamera.mmalobj import PiResolution, PiFramerateRange
 from picamera.camera import PiCamera
+from picamera.display import PiDisplay
 from picamera.frames import PiVideoFrame, PiVideoFrameType
 from picamera.encoders import (
     PiEncoder,

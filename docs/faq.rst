@@ -109,7 +109,7 @@ power supply may be insufficient. A practical minimum is 1A for running a Pi
 with an active camera module; more may be required if additional peripherals
 are attached.
 
-.. _requires 250mA: http://www.raspberrypi.org/help/faqs/#cameraPower
+.. _requires 250mA: https://www.raspberrypi.org/help/faqs/#cameraPower
 
 How can I take two consecutive pictures with equivalent settings?
 =================================================================
@@ -253,6 +253,37 @@ only want the camera to output the H264 stream so you can mux it with, say, an
 AAC stream recorded from the microphone input and wrap the result into a full
 MP4 file.
 
+To convert the H264 NAL stream to a full MP4 file, there are a couple of
+options. The simplest is to use the ``MP4Box`` utility from the ``gpac``
+package on Raspbian. Unfortunately this only works with files; it cannot accept
+redirected streams:
+
+.. code-block:: console
+
+    $ sudo apt-get install gpac
+    ...
+    $ MP4Box -add input.h264 output.mp4
+
+Alternatively you can use the console version of VLC to handle the conversion.
+This is a more complex command line, but a lot more powerful (it'll handle
+redirected streams and can be used with a vast array of outputs including
+HTTP, RTP, etc.):
+
+.. code-block:: console
+
+    $ sudo apt-get install vlc
+    ...
+    $ cvlc input.h264 --play-and-exit --sout \
+    > '#standard{access=file,mux=mp4,dst=output.mp4}' :demux=h264 \
+
+Or to read from stdin:
+
+.. code-block:: console
+
+    $ raspivid -t 5000 -o - | cvlc stream:///dev/stdin \
+    > --play-and-exit --sout \
+    > '#standard{access=file,mux=mp4,dst=output.mp4}' :demux=h264 \
+
 Out of resources at full resolution on a V2 module
 ==================================================
 
@@ -270,3 +301,45 @@ example::
     camera = PiCamera()
     camera.resolution = camera.MAX_RESOLUTION
     camera.start_preview(resolution=(1024, 768))
+
+Camera locks up with multiprocessing
+====================================
+
+The camera firmware is designed to be used by a *single* process at a time.
+Attempting to use the camera from multiple processes simultaneously will fail
+in a variety of ways (from simple errors to the process locking up).
+
+Python's :mod:`multiprocessing` module creates multiple copies of a Python
+process (usually via :func:`os.fork`) for the purpose of parallel processing.
+Whilst you can use :mod:`multiprocessing` with picamera, you must ensure that
+only a *single* process creates a :class:`PiCamera` instance at any given time.
+
+The following script demonstrates an approach with one process that owns the
+camera, which handles disseminating captured frames to other processes via a
+:class:`~multiprocessing.Queue`:
+
+.. literalinclude:: examples/multiproc_camera.py
+
+VLC won't play back MJPEG recordings
+====================================
+
+`MJPEG`_ is a particularly ill-defined format (see "`Disadvantages`_") which
+results in compatibility issues between software that purports to produce MJPEG
+files, and software that purports to play MJPEG files. This is one such case:
+the Pi's camera firmware produces an MJPEG file which simply consists of
+concatenated JPEGs; this is reasonably common on other devices and webcams, and
+is a nice simple format which makes parsing particularly easy (see
+:ref:`web_streaming` for an example).
+
+Unfortunately, VLC doesn't recognize this as a valid MJPEG file: it thinks it's
+a single JPEG image and doesn't bother reading the rest of the file (which is
+also a reasonable interpretation in the absence of any other information).
+Thankfully, extra command line switches can be provided to give it a hint that
+there's more to read in the file:
+
+.. code-block:: console
+
+    $ vlc --demux=mjpeg --mjpeg-fps=30 my_recording.mjpeg
+
+.. _MJPEG: https://en.wikipedia.org/wiki/Motion_JPEG
+.. _Disadvantages: https://en.wikipedia.org/wiki/Motion_JPEG#Disadvantages

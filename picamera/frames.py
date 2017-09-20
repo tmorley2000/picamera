@@ -1,7 +1,7 @@
 # vim: set et sw=4 sts=4 fileencoding=utf-8:
 #
 # Python camera library for the Rasperry-Pi camera module
-# Copyright (c) 2013-2015 Dave Jones <dave@waveform.org.uk>
+# Copyright (c) 2013-2017 Dave Jones <dave@waveform.org.uk>
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions are met:
@@ -93,10 +93,10 @@ class PiVideoFrame(namedtuple('PiVideoFrame', (
     'complete',      # whether the frame is complete or not
     ))):
     """
-    This class is a namedtuple derivative used to store information about a
-    video frame. It is recommended that you access the information stored by
-    this class by attribute name rather than position (for example:
-    ``frame.index`` rather than ``frame[0]``).
+    This class is a :func:`~collections.namedtuple` derivative used to store
+    information about a video frame. It is recommended that you access the
+    information stored by this class by attribute name rather than position
+    (for example: ``frame.index`` rather than ``frame[0]``).
 
     .. attribute:: index
 
@@ -121,8 +121,8 @@ class PiVideoFrame(namedtuple('PiVideoFrame', (
 
     .. attribute:: video_size
 
-        Returns the size in bytes of the entire video up to the current frame.
-        Note that this is unlikely to match the size of the actual file/stream
+        Returns the size in bytes of the entire video up to this frame.  Note
+        that this is unlikely to match the size of the actual file/stream
         written so far. This is because a stream may utilize buffering which
         will cause the actual amount written (e.g. to disk) to lag behind the
         value reported by this attribute.
@@ -136,20 +136,24 @@ class PiVideoFrame(namedtuple('PiVideoFrame', (
 
     .. attribute:: timestamp
 
-        Returns the presentation timestamp (PTS) of the current frame as
-        reported by the encoder. When the camera's clock mode is ``'reset'``
-        (the default), this is the number of microseconds (millionths of a
-        second) since video recording started. When the camera's
-        :attr:`~PiCamera.clock_mode` is ``'raw'``, this is the number of
-        microseconds since the last system reboot. See
-        :attr:`~PiCamera.timestamp` for more information.
+        Returns the presentation timestamp (PTS) of the frame. This represents
+        the point in time that the Pi received the first line of the frame from
+        the camera.
+
+        The timestamp is measured in microseconds (millionths of a second).
+        When the camera's clock mode is ``'reset'`` (the default), the
+        timestamp is relative to the start of the video recording.  When the
+        camera's :attr:`~PiCamera.clock_mode` is ``'raw'``, it is relative to
+        the last system reboot. See :attr:`~PiCamera.timestamp` for more
+        information.
 
         .. warning::
 
-            Currently, the video encoder occasionally returns "time unknown"
-            values in this field which picamera represents as ``None``. If you
-            are querying this property you will need to check the value is not
-            ``None`` before using it.
+            Currently, the camera occasionally returns "time unknown" values in
+            this field which picamera represents as ``None``. If you are
+            querying this property you will need to check the value is not
+            ``None`` before using it. This happens for SPS header "frames",
+            for example.
 
     .. attribute:: complete
 
@@ -164,6 +168,8 @@ class PiVideoFrame(namedtuple('PiVideoFrame', (
     .. versionchanged:: 1.9
         Added the :attr:`complete` attribute.
     """
+
+    __slots__ = () # workaround python issue #24931
 
     @property
     def position(self):

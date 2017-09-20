@@ -1,7 +1,7 @@
 # vim: set et sw=4 sts=4 fileencoding=utf-8:
 #
 # Python camera library for the Rasperry-Pi camera module
-# Copyright (c) 2013-2015 Dave Jones <dave@waveform.org.uk>
+# Copyright (c) 2013-2017 Dave Jones <dave@waveform.org.uk>
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions are met:
@@ -43,6 +43,8 @@ import pytest
 import time
 from fractions import Fraction
 from decimal import Decimal
+
+from verify import isclose
 
 
 def numeric_attr(camera, attr, value_min, value_max, step=1):
@@ -88,11 +90,11 @@ def test_annotate_text(camera, previewing):
     save_value = camera.annotate_text
     try:
         camera.annotate_text = ''
-        assert camera.annotate_text == u''
+        assert camera.annotate_text == ''
         camera.annotate_text = 'foo'
-        assert camera.annotate_text == u'foo'
+        assert camera.annotate_text == 'foo'
         camera.annotate_text = 'foo bar baz quux xyzzy'
-        assert camera.annotate_text == u'foo bar baz quux xyzzy'
+        assert camera.annotate_text == 'foo bar baz quux xyzzy'
         with pytest.raises(picamera.PiCameraValueError):
             camera.annotate_text = ('abcd' * 64) + 'a'
         with pytest.raises(picamera.PiCameraValueError):
@@ -412,7 +414,6 @@ def test_preview_hflip(camera, previewing):
     if previewing:
         boolean_attr(camera.preview, 'hflip')
 
-@pytest.mark.xfail(reason="Fails when camera init uses mode 0")
 def test_sensor_mode(camera, previewing):
     save_mode = camera.sensor_mode
     try:
@@ -427,7 +428,7 @@ def test_sensor_mode(camera, previewing):
 def test_framerate_delta(camera, previewing):
     for num in range(-10, 11):
         camera.framerate_delta = num / 10
-        assert Fraction(num, 10) - Fraction(1, 256) <= camera.framerate_delta <= Fraction(num, 10) + Fraction(1, 256)
+        assert isclose(camera.framerate_delta, Fraction(num, 10), rel_tol=Fraction(1, 256))
 
 def test_framerate(camera, previewing):
     save_framerate = camera.framerate
@@ -463,6 +464,37 @@ def test_framerate(camera, previewing):
             camera.framerate = -1
         with pytest.raises(picamera.PiCameraError):
             camera.framerate = 200
+        with pytest.raises(picamera.PiCameraError):
+            camera.framerate = 0
+    finally:
+        camera.framerate = save_framerate
+
+def test_framerate_range(camera, previewing):
+    save_framerate = camera.framerate
+    try:
+        tol = Fraction(1, 256)
+        camera.framerate_range = (Fraction(1, 6), 1)
+        assert camera.framerate == 0
+        assert isclose(camera.framerate_range.low, Fraction(1, 6), rel_tol=tol)
+        assert isclose(camera.framerate_range.high, 1, rel_tol=tol)
+        camera.framerate_range = (Fraction(50, 1000), Fraction(166, 1000))
+        assert camera.framerate == 0
+        assert isclose(camera.framerate_range.low, Fraction(50, 1000), rel_tol=tol)
+        assert isclose(camera.framerate_range.high, Fraction(166, 1000), rel_tol=tol)
+        camera.framerate_range = (1, 5)
+        assert camera.framerate == 0
+        assert camera.framerate_range == (1, 5)
+        camera.framerate_range = (1, 30.0)
+        assert camera.framerate == 0
+        assert camera.framerate_range == (1, 30)
+        with pytest.raises(picamera.PiCameraError):
+            camera.framerate_delta = 1
+        with pytest.raises(picamera.PiCameraError):
+            camera.framerate_range = (1, 200)
+        with pytest.raises(picamera.PiCameraError):
+            camera.framerate_range = (0, 30)
+        with pytest.raises(picamera.PiCameraError):
+            camera.framerate_range = (2, 1)
     finally:
         camera.framerate = save_framerate
 

@@ -1,7 +1,7 @@
 # vim: set et sw=4 sts=4 fileencoding=utf-8:
 #
 # Python camera library for the Rasperry-Pi camera module
-# Copyright (c) 2013-2015 Dave Jones <dave@waveform.org.uk>
+# Copyright (c) 2013-2017 Dave Jones <dave@waveform.org.uk>
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions are met:
@@ -43,12 +43,19 @@ except NameError:
     pass
 
 import io
+import ctypes as ct
 import warnings
 
 import numpy as np
 from numpy.lib.stride_tricks import as_strided
 
-from .exc import PiCameraValueError, PiCameraDeprecated
+from . import mmalobj as mo, mmal
+from .exc import (
+    mmal_check,
+    PiCameraValueError,
+    PiCameraDeprecated,
+    PiCameraPortDisabled,
+    )
 
 
 motion_dtype = np.dtype([
@@ -86,14 +93,21 @@ def bytes_to_yuv(data, resolution):
             'Incorrect buffer length for resolution %dx%d' % (width, height))
     # Separate out the Y, U, and V values from the array
     a = np.frombuffer(data, dtype=np.uint8)
-    Y = a[:y_len]
-    U = a[y_len:-uv_len]
-    V = a[-uv_len:]
+    Y = a[:y_len].reshape((fheight, fwidth))
+    Uq = a[y_len:-uv_len].reshape((fheight // 2, fwidth // 2))
+    Vq = a[-uv_len:].reshape((fheight // 2, fwidth // 2))
     # Reshape the values into two dimensions, and double the size of the
     # U and V values (which only have quarter resolution in YUV4:2:0)
-    Y = Y.reshape((fheight, fwidth))
-    U = U.reshape((fheight // 2, fwidth // 2)).repeat(2, axis=0).repeat(2, axis=1)
-    V = V.reshape((fheight // 2, fwidth // 2)).repeat(2, axis=0).repeat(2, axis=1)
+    U = np.empty_like(Y)
+    V = np.empty_like(Y)
+    U[0::2, 0::2] = Uq
+    U[0::2, 1::2] = Uq
+    U[1::2, 0::2] = Uq
+    U[1::2, 1::2] = Uq
+    V[0::2, 0::2] = Vq
+    V[0::2, 1::2] = Vq
+    V[1::2, 0::2] = Vq
+    V[1::2, 1::2] = Vq
     # Stack the channels together and crop to the actual resolution
     return np.dstack((Y, U, V))[:height, :width]
 
@@ -107,7 +121,7 @@ def bytes_to_rgb(data, resolution):
     # Workaround: output from the video splitter is rounded to 16x16 instead
     # of 32x16 (but only for RGB, and only when a resizer is not used)
     if len(data) != (fwidth * fheight * 3):
-        fwidth, fheith = raw_resolution(resolution, splitter=True)
+        fwidth, fheight = raw_resolution(resolution, splitter=True)
         if len(data) != (fwidth * fheight * 3):
             raise PiCameraValueError(
                 'Incorrect buffer length for resolution %dx%d' % (width, height))
@@ -270,7 +284,7 @@ class PiYUVArray(PiArrayOutput):
                 print('Captured %dx%d image' % (
                         output.array.shape[1], output.array.shape[0]))
 
-    .. _ITU-R BT.601: http://en.wikipedia.org/wiki/YCbCr#ITU-R_BT.601_conversion
+    .. _ITU-R BT.601: https://en.wikipedia.org/wiki/YCbCr#ITU-R_BT.601_conversion
     """
 
     def __init__(self, camera, size=None):
@@ -300,6 +314,21 @@ class PiYUVArray(PiArrayOutput):
         return self._rgb
 
 
+class BroadcomRawHeader(ct.Structure):
+    _fields_ = [
+        ('name',          ct.c_char * 32),
+        ('width',         ct.c_uint16),
+        ('height',        ct.c_uint16),
+        ('padding_right', ct.c_uint16),
+        ('padding_down',  ct.c_uint16),
+        ('dummy',         ct.c_uint32 * 6),
+        ('transform',     ct.c_uint16),
+        ('format',        ct.c_uint16),
+        ('bayer_order',   ct.c_uint8),
+        ('bayer_format',  ct.c_uint8),
+        ]
+
+
 class PiBayerArray(PiArrayOutput):
     """
     Produces a 3-dimensional RGB array from raw Bayer data.
@@ -307,9 +336,8 @@ class PiBayerArray(PiArrayOutput):
     This custom output class is intended to be used with the
     :meth:`~picamera.PiCamera.capture` method, with the *bayer* parameter set
     to ``True``, to include raw Bayer data in the JPEG output.  The class
-    strips out the raw data, constructing a 3-dimensional numpy array organized
-    as (rows, columns, colors). The resulting data is accessed via the
-    :attr:`~PiArrayOutput.array` attribute::
+    strips out the raw data, and constructs a numpy array from it.  The
+    resulting data is accessed via the :attr:`~PiArrayOutput.array` attribute::
 
         import picamera
         import picamera.array
@@ -319,12 +347,28 @@ class PiBayerArray(PiArrayOutput):
                 camera.capture(output, 'jpeg', bayer=True)
                 print(output.array.shape)
 
-    Note that Bayer data is *always* full resolution, so the resulting
-    array always has the shape (1944, 2592, 3) with the V1 module, or
-    (2464, 3280, 3) with the V2 module; this also implies that the
-    optional *size* parameter (for specifying a resizer resolution) is not
-    available with this array class. As the sensor records 10-bit values,
-    the array uses the unsigned 16-bit integer data type.
+    The *output_dims* parameter specifies whether the resulting array is
+    three-dimensional (the default, or when *output_dims* is 3), or
+    two-dimensional (when *output_dims* is 2). The three-dimensional data is
+    already separated into the three color planes, whilst the two-dimensional
+    variant is not (in which case you need to know the Bayer ordering to
+    accurately deal with the results).
+
+    .. note::
+
+        Bayer data is *usually* full resolution, so the resulting array usually
+        has the shape (1944, 2592, 3) with the V1 module, or (2464, 3280, 3)
+        with the V2 module (if two-dimensional output is requested the
+        3-layered color dimension is omitted). If the camera's
+        :attr:`~picamera.PiCamera.sensor_mode` has been forced to something
+        other than 0, then the output will be the native size for the requested
+        sensor mode.
+
+        This also implies that the optional *size* parameter (for specifying a
+        resizer resolution) is not available with this array class.
+
+    As the sensor records 10-bit values, the array uses the unsigned 16-bit
+    integer data type.
 
     By default, `de-mosaicing`_ is **not** performed; if the resulting array is
     viewed it will therefore appear dark and too green (due to the green bias
@@ -344,56 +388,126 @@ class PiBayerArray(PiArrayOutput):
     other usual post-processing steps like auto-exposure, white-balance,
     vignette compensation, and smoothing have been performed).
 
-    .. _de-mosaicing: http://en.wikipedia.org/wiki/Demosaicing
-    .. _Bayer pattern: http://en.wikipedia.org/wiki/Bayer_filter
-    """
+    .. versionchanged:: 1.13
+        This class now supports the V2 module properly, and handles flipped
+        images, and forced sensor modes correctly.
 
-    def __init__(self, camera):
+    .. _de-mosaicing: https://en.wikipedia.org/wiki/Demosaicing
+    .. _Bayer pattern: https://en.wikipedia.org/wiki/Bayer_filter
+    """
+    BAYER_OFFSETS = {
+        0: ((0, 0), (1, 0), (0, 1), (1, 1)),
+        1: ((1, 0), (0, 0), (1, 1), (0, 1)),
+        2: ((1, 1), (0, 1), (1, 0), (0, 0)),
+        3: ((0, 1), (1, 1), (0, 0), (1, 0)),
+        }
+
+    def __init__(self, camera, output_dims=3):
         super(PiBayerArray, self).__init__(camera, size=None)
+        if not (2 <= output_dims <= 3):
+            raise PiCameraValueError('output_dims must be 2 or 3')
         self._demo = None
+        self._header = None
+        self._output_dims = output_dims
+
+    @property
+    def output_dims(self):
+        return self._output_dims
+
+    def _to_3d(self, array):
+        array_3d = np.zeros(array.shape + (3,), dtype=array.dtype)
+        (
+            (ry, rx), (gy, gx), (Gy, Gx), (by, bx)
+            ) = PiBayerArray.BAYER_OFFSETS[self._header.bayer_order]
+        array_3d[ry::2, rx::2, 0] = array[ry::2, rx::2] # Red
+        array_3d[gy::2, gx::2, 1] = array[gy::2, gx::2] # Green
+        array_3d[Gy::2, Gx::2, 1] = array[Gy::2, Gx::2] # Green
+        array_3d[by::2, bx::2, 2] = array[by::2, bx::2] # Blue
+        return array_3d
 
     def flush(self):
         super(PiBayerArray, self).flush()
         self._demo = None
-        ver = 1
-        data = self.getvalue()[-6404096:]
+        offset = {
+            'OV5647': {
+                0: 6404096,
+                1: 2717696,
+                2: 6404096,
+                3: 6404096,
+                4: 1625600,
+                5: 1233920,
+                6: 445440,
+                7: 445440,
+                },
+            'IMX219': {
+                0: 10270208,
+                1: 2678784,
+                2: 10270208,
+                3: 10270208,
+                4: 2628608,
+                5: 1963008,
+                6: 1233920,
+                7: 445440,
+                },
+            }[self.camera.revision.upper()][self.camera.sensor_mode]
+        data = self.getvalue()[-offset:]
         if data[:4] != b'BRCM':
-            ver = 2
-            data = self.getvalue()[-10270208:]
-            if data[:4] != b'BRCM':
-                raise PiCameraValueError('Unable to locate Bayer data at end of buffer')
-        # Strip header
-        data = data[32768:]
-        # Reshape into 2D pixel values
-        reshape, crop = {
-            1: ((1952, 3264), (1944, 3240)),
-            2: ((2480, 4128), (2464, 4100)),
-            }[ver]
-        data = np.frombuffer(data, dtype=np.uint8).\
-                reshape(reshape)[:crop[0], :crop[1]]
+            raise PiCameraValueError('Unable to locate Bayer data at end of buffer')
+        # Extract header (with bayer order and other interesting bits), which
+        # is 176 bytes from start of bayer data, and pixel data which 32768
+        # bytes from start of bayer data
+        self._header = BroadcomRawHeader.from_buffer_copy(
+            data[176:176 + ct.sizeof(BroadcomRawHeader)])
+        data = np.frombuffer(data, dtype=np.uint8, offset=32768)
+        # Reshape and crop the data. The crop's width is multiplied by 5/4 to
+        # deal with the packed 10-bit format; the shape's width is calculated
+        # in a similar fashion but with padding included (which involves
+        # several additional padding steps)
+        crop = mo.PiResolution(
+            self._header.width * 5 // 4,
+            self._header.height)
+        shape = mo.PiResolution(
+            (((self._header.width + self._header.padding_right) * 5) + 3) // 4,
+            (self._header.height + self._header.padding_down)
+            ).pad()
+        data = data.reshape((shape.height, shape.width))[:crop.height, :crop.width]
         # Unpack 10-bit values; every 5 bytes contains the high 8-bits of 4
         # values followed by the low 2-bits of 4 values packed into the fifth
         # byte
         data = data.astype(np.uint16) << 2
         for byte in range(4):
             data[:, byte::5] |= ((data[:, 4::5] >> ((4 - byte) * 2)) & 3)
-        data = np.delete(data, np.s_[4::5], 1)
-        # XXX Should test camera's vflip and hflip settings here and adjust
-        self.array = np.zeros(data.shape + (3,), dtype=data.dtype)
-        self.array[1::2, 0::2, 0] = data[1::2, 0::2] # Red
-        self.array[0::2, 0::2, 1] = data[0::2, 0::2] # Green
-        self.array[1::2, 1::2, 1] = data[1::2, 1::2] # Green
-        self.array[0::2, 1::2, 2] = data[0::2, 1::2] # Blue
+        self.array = np.zeros(
+            (data.shape[0], data.shape[1] * 4 // 5), dtype=np.uint16)
+        for i in range(4):
+            self.array[:, i::4] = data[:, i::5]
+        if self.output_dims == 3:
+            self.array = self._to_3d(self.array)
 
     def demosaic(self):
+        """
+        Perform a rudimentary `de-mosaic`_ of ``self.array``, returning the
+        result as a new array. The result of the demosaic is *always* three
+        dimensional, with the last dimension being the color planes (see
+        *output_dims* parameter on the constructor).
+
+        .. _de-mosaic: https://en.wikipedia.org/wiki/Demosaicing
+        """
         if self._demo is None:
-            # XXX Again, should take into account camera's vflip and hflip here
+            # Construct 3D representation of Bayer data (if necessary)
+            if self.output_dims == 2:
+                array_3d = self._to_3d(self.array)
+            else:
+                array_3d = self.array
             # Construct representation of the bayer pattern
-            bayer = np.zeros(self.array.shape, dtype=np.uint8)
-            bayer[1::2, 0::2, 0] = 1 # Red
-            bayer[0::2, 0::2, 1] = 1 # Green
-            bayer[1::2, 1::2, 1] = 1 # Green
-            bayer[0::2, 1::2, 2] = 1 # Blue
+            bayer = np.zeros(array_3d.shape, dtype=np.uint8)
+            (
+                (ry, rx), (gy, gx), (Gy, Gx), (by, bx)
+                ) = PiBayerArray.BAYER_OFFSETS[self._header.bayer_order]
+            bayer[ry::2, rx::2, 0] = 1 # Red
+            bayer[gy::2, gx::2, 1] = 1 # Green
+            bayer[Gy::2, Gx::2, 1] = 1 # Green
+            bayer[by::2, bx::2, 2] = 1 # Blue
             # Allocate output array with same shape as data and set up some
             # constants to represent the weighted average window
             window = (3, 3)
@@ -403,17 +517,17 @@ class PiBayerArray(PiArrayOutput):
             # unavailable on the version of numpy shipped with Raspbian at the
             # time of writing)
             rgb = np.zeros((
-                self.array.shape[0] + borders[0],
-                self.array.shape[1] + borders[1],
-                self.array.shape[2]), dtype=self.array.dtype)
+                array_3d.shape[0] + borders[0],
+                array_3d.shape[1] + borders[1],
+                array_3d.shape[2]), dtype=array_3d.dtype)
             rgb[
                 border[0]:rgb.shape[0] - border[0],
                 border[1]:rgb.shape[1] - border[1],
-                :] = self.array
+                :] = array_3d
             bayer_pad = np.zeros((
-                self.array.shape[0] + borders[0],
-                self.array.shape[1] + borders[1],
-                self.array.shape[2]), dtype=bayer.dtype)
+                array_3d.shape[0] + borders[0],
+                array_3d.shape[1] + borders[1],
+                array_3d.shape[2]), dtype=bayer.dtype)
             bayer_pad[
                 border[0]:bayer_pad.shape[0] - border[0],
                 border[1]:bayer_pad.shape[1] - border[1],
@@ -422,7 +536,7 @@ class PiBayerArray(PiArrayOutput):
             # For each plane in the RGB data, construct a view over the plane
             # of 3x3 matrices. Then do the same for the bayer array and use
             # Einstein summation to get the weighted average
-            self._demo = np.empty(self.array.shape, dtype=self.array.dtype)
+            self._demo = np.empty(array_3d.shape, dtype=array_3d.dtype)
             for plane in range(3):
                 p = rgb[..., plane]
                 b = bayer[..., plane]
@@ -628,8 +742,8 @@ class PiMotionArray(PiArrayOutput):
         This class is not suitable for real-time analysis of motion vector
         data. See the :class:`PiMotionAnalysis` class instead.
 
-    .. _macro-blocks: http://en.wikipedia.org/wiki/Macroblock
-    .. _sum of absolute differences: http://en.wikipedia.org/wiki/Sum_of_absolute_differences
+    .. _macro-blocks: https://en.wikipedia.org/wiki/Macroblock
+    .. _sum of absolute differences: https://en.wikipedia.org/wiki/Sum_of_absolute_differences
     """
 
     def flush(self):
@@ -656,7 +770,7 @@ class PiAnalysisOutput(io.IOBase):
         self.camera = camera
         self.size = size
 
-    def writeable(self):
+    def writable(self):
         return True
 
     def write(self, b):
@@ -822,4 +936,109 @@ class PiMotionAnalysis(PiAnalysisOutput):
                 np.frombuffer(b, dtype=motion_dtype).\
                 reshape((self.rows, self.cols)))
         return result
+
+
+class MMALArrayBuffer(mo.MMALBuffer):
+    __slots__ = ('_shape',)
+
+    def __init__(self, port, buf):
+        super(MMALArrayBuffer, self).__init__(buf)
+        width = port._format[0].es[0].video.width
+        height = port._format[0].es[0].video.height
+        bpp = self.size // (width * height)
+        self.offset = 0
+        self.length = width * height * bpp
+        self._shape = (height, width, bpp)
+
+    def __enter__(self):
+        mmal_check(
+            mmal.mmal_buffer_header_mem_lock(self._buf),
+            prefix='unable to lock buffer header memory')
+        assert self.offset == 0
+        return np.frombuffer(
+            ct.cast(
+                self._buf[0].data,
+                ct.POINTER(ct.c_uint8 * self._buf[0].alloc_size)).contents,
+            dtype=np.uint8, count=self.length).reshape(self._shape)
+
+    def __exit__(self, *exc):
+        mmal.mmal_buffer_header_mem_unlock(self._buf)
+        return False
+
+
+class PiArrayTransform(mo.MMALPythonComponent):
+    """
+    A derivative of :class:`~picamera.mmalobj.MMALPythonComponent` which eases
+    the construction of custom MMAL transforms by representing buffer data as
+    numpy arrays. The *formats* parameter specifies the accepted input
+    formats as a sequence of strings (default: 'rgb', 'bgr', 'rgba', 'bgra').
+
+    Override the :meth:`transform` method to modify buffers sent to the
+    component, then place it in your MMAL pipeline as you would a normal
+    encoder.
+    """
+    __slots__ = ()
+
+    def __init__(self, formats=('rgb', 'bgr', 'rgba', 'bgra')):
+        super(PiArrayTransform, self).__init__()
+        if isinstance(formats, bytes):
+            formats = formats.decode('ascii')
+        if isinstance(formats, str):
+            formats = (formats,)
+        try:
+            formats = {
+                {
+                    'rgb': mmal.MMAL_ENCODING_RGB24,
+                    'bgr': mmal.MMAL_ENCODING_BGR24,
+                    'rgba': mmal.MMAL_ENCODING_RGBA,
+                    'bgra': mmal.MMAL_ENCODING_BGRA,
+                    }[fmt]
+                for fmt in formats
+                }
+        except KeyError as e:
+            raise PiCameraValueError(
+                'PiArrayTransform cannot handle format %s' % str(e))
+        self.inputs[0].supported_formats = formats
+        self.outputs[0].supported_formats = formats
+
+    def _callback(self, port, source_buf):
+        try:
+            target_buf = self.outputs[0].get_buffer(False)
+        except PiCameraPortDisabled:
+            return False
+        if target_buf:
+            target_buf.copy_meta(source_buf)
+            result = self.transform(
+                MMALArrayBuffer(port, source_buf._buf),
+                MMALArrayBuffer(self.outputs[0], target_buf._buf))
+            try:
+                self.outputs[0].send_buffer(target_buf)
+            except PiCameraPortDisabled:
+                return False
+        return False
+
+    def transform(self, source, target):
+        """
+        This method will be called for every frame passing through the
+        transform.  The *source* and *target* parameters represent buffers from
+        the input and output ports of the transform respectively. They will be
+        derivatives of :class:`~picamera.mmalobj.MMALBuffer` which return a
+        3-dimensional numpy array when used as context managers. For example::
+
+            def transform(self, source, target):
+                with source as source_array, target as target_array:
+                    # Copy the source array data to the target
+                    target_array[...] = source_array
+                    # Draw a box around the edges
+                    target_array[0, :, :] = 0xff
+                    target_array[-1, :, :] = 0xff
+                    target_array[:, 0, :] = 0xff
+                    target_array[:, -1, :] = 0xff
+                    return False
+
+        The target buffer's meta-data starts out as a copy of the source
+        buffer's meta-data, but the target buffer's data starts out
+        uninitialized.
+        """
+        return False
 
