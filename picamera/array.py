@@ -592,7 +592,7 @@ class PiFastBayerArray(PiBayerArray):
       integers.
     """
     def flush(self):
-        picamera.array.PiArrayOutput.flush(self) 
+        PiArrayOutput.flush(self) 
         self._demo = None
         ver = 1
         data = self.getvalue()[-6404096:]
