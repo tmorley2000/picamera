@@ -471,9 +471,14 @@ class PiBayerArray(PiArrayOutput):
             (self._header.height + self._header.padding_down)
             ).pad()
         data = data.reshape((shape.height, shape.width))[:crop.height, :crop.width]
+        self.data_to_array(data)
+        
+    def data_to_array(self, data):
+        """Convert the cropped, reshaped array of 8 bit numbers into a sensible array"""
         # Unpack 10-bit values; every 5 bytes contains the high 8-bits of 4
         # values followed by the low 2-bits of 4 values packed into the fifth
         # byte
+        # rwb27: separated this out to allow for different conversion by PiFastBayerArray
         data = data.astype(np.uint16) << 2
         for byte in range(4):
             data[:, byte::5] |= ((data[:, 4::5] >> ((4 - byte) * 2)) & 3)
@@ -483,7 +488,7 @@ class PiBayerArray(PiArrayOutput):
             self.array[:, i::4] = data[:, i::5]
         if self.output_dims == 3:
             self.array = self._to_3d(self.array)
-
+        
     def demosaic(self):
         """
         Perform a rudimentary `de-mosaic`_ of ``self.array``, returning the
@@ -553,6 +558,7 @@ class PiBayerArray(PiArrayOutput):
 
 
 class PiFastBayerArray(PiBayerArray):
+    _demo_shift = None # cache the value of "shift" used in demosaicing
     """
     Produces a 3-dimensional RGB array from raw Bayer data, at half resolution.
 
@@ -591,27 +597,11 @@ class PiFastBayerArray(PiBayerArray):
       :meth:`~PiBayerArray` but will still be an RGB array of unsigned 8-bit 
       integers.
     """
-    def flush(self):
-        PiArrayOutput.flush(self) 
-        self._demo = None
-        ver = 1
-        data = self.getvalue()[-6404096:]
-        if data[:4] != b'BRCM':
-            ver = 2
-            data = self.getvalue()[-10270208:]
-            if data[:4] != b'BRCM':
-                raise PiCameraValueError('Unable to locate Bayer data at end of buffer')
-        # Strip header
-        data = data[32768:]
-        # Reshape into 2D pixel values
-        reshape, crop = {
-            1: ((1952, 3264), (1944, 3240)),
-            2: ((2480, 4128), (2464, 4100)),
-            }[ver]
-        data = np.frombuffer(data, dtype=np.uint8).\
-                reshape(reshape)[:crop[0], :crop[1]]
+    def data_to_array(self, data):
         self.array = data # This is not quite the raw Bayer data - every 5th element
-          # is four lots of two least-significant-bits.
+          # is four lots of two least-significant-bits.  In this PiBayerArray subclass,
+          # we skip converting it to a full resolution 16-bit array.  Instead, we leave
+          # it as a 5-bytes-for-4-pixels format array, and 
 
     def demosaic(self, shift=0):
         """Convert the raw Bayer data into a half-resolution RGB array.
@@ -635,12 +625,15 @@ class PiFastBayerArray(PiBayerArray):
         Thus, we gain an extra bit of precision from averaging, allowing us to
         effectively produce an 11-bit image.
         """
-        if self._demo is None:
-            # XXX Again, should take into account camera's vflip and hflip here
+        if self._demo is None or self._demo_shift != shift:
+            # As with `PiBayerArray`, should take into account vflip and hflip here
             # Extract the R, G1, G2, B pixels into separate slices
             # NB these should _not_ need to be copied at this stage.
             # NB we end up with odd and even arrays for each because every
             # 5th element is the least-significant-bits.
+            
+            self._demo_shift = shift # remember this value, so we will recalculate
+                                     # if called again with a different shift value.
             def bayer_slices(i, j, shift=shift):
                 if shift == 0: # Return the top 8 bits
                     # This should be really fast - they ought to be slices
@@ -663,7 +656,7 @@ class PiFastBayerArray(PiBayerArray):
                         # A shift of 3 leaves the LSB at zero.  It's only
                         # included because the two green pixels means that
                         # we do generate an LSB for green even with a shfit
-                        # of 3.  This might be handy for fluorescence.
+                        # of 3.  This might be handy for fluorescence images.
                         a += ((lsb >> (3 - j)*2) & 3) << 1
                         b += ((lsb >> (1 - j)*2) & 3) << 1
                     return a, b
@@ -679,10 +672,10 @@ class PiFastBayerArray(PiBayerArray):
             rgb[:,1::2,0] = Rb # Red pixels (odd)
             rgb[:,0::2,2] = Ba
             rgb[:,1::2,2] = Bb
-            rgb[:,0::2,1] = G1a/2 # There are twice as many greens, so we
-            rgb[:,1::2,1] = G1b/2 # take an average
-            rgb[:,0::2,1] += G2a/2
-            rgb[:,1::2,1] += G2b/2
+            rgb[:,0::2,1] = G1a//2 # There are twice as many greens, so we
+            rgb[:,1::2,1] = G1b//2 # take an average
+            rgb[:,0::2,1] += G2a//2
+            rgb[:,1::2,1] += G2b//2
             self._demo = rgb
         return self._demo
 
