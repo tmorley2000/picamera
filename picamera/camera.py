@@ -2499,27 +2499,45 @@ class PiCamera(object):
         return (4,) + tuple([(r // 64) + 1 for r in full_resolution[::-1]])
         
     def _validate_lens_shading_table(self, lens_shading_table, sensor_mode):
-        """Check a lens shading table is valid and raise an exception if not."""
+        """Check a lens shading table is valid and raise an exception if not.
+        
+        ``lens_shading_table`` should be a 
+
+        If the object passed to this function is not a memoryview object, we 
+        will attempt to create one by calling ``memoryview(lens_shading_table)``
+        and using the result.
+        """
+        if not isinstance(lens_shading_table, memoryview):
+            try:
+                lens_shading_table = memoryview(lens_shading_table)
+            except:
+                raise PiCameraValueError("The lens shading table must be a "
+                                         "memoryview object, or must be able "
+                                         "to be converted to one by calling "
+                                         "memoryview(obj).")
         table_shape = self._lens_shading_table_shape(sensor_mode)
         if lens_shading_table.shape != table_shape:
             raise PiCameraValueError("The lens shading table should have shape {} "
                                      "for mode {}".format(table_shape, sensor_mode))
         # Ensure the array is uint8.  NB the slightly odd string comparison
         # avoids a hard dependency on numpy.
-        if lens_shading_table.dtype.name != "uint8":
-            raise PiCameraValueError("Lens shading tables must be uint8")
-        if not lens_shading_table.flags['C_CONTIGUOUS']:
-            raise ValueError("The lens shading table must be a C-contiguous numpy array") # make sure the array is contiguous in memory
+        if lens_shading_table.format != "B":
+            raise PiCameraValueError("Lens shading tables must be unsigned 8-bit integers")
+        if not lens_shading_table.c_contiguous:
+            raise ValueError("The lens shading table must be a C-contiguous array of unsigned bytes") # make sure the array is contiguous in memory
+        return lens_shading_table
             
     def _upload_lens_shading_table(self, lens_shading_table, sensor_mode=None):
-        """Actually commit the lens shading table to the camera."""
+        """Actually commit the lens shading table to the camera.
+        
+        See documentation for the ``lens_shading_table property`` for details of the arguments."""
         if lens_shading_table is None:
             self._lens_shading_table = None
             # Given that we reset the camera each time anyway, hopefully we revert
             # to built-in lens shading correction by simply doing nothing here!
             return
             
-        self._validate_lens_shading_table(lens_shading_table, sensor_mode)
+        lens_shading_table = self._validate_lens_shading_table(lens_shading_table, sensor_mode)
         nchannels, grid_height, grid_width = lens_shading_table.shape
         # This sets the lens shading table based on the example code by 6by9
         # https://github.com/6by9/lens_shading/
@@ -2558,7 +2576,7 @@ class PiCamera(object):
                                   _set_lens_shading_table, doc="""\
         Retrieves or sets the lens shading correction table.
 
-        This is an advanced property which can be used to control the camera's
+        This property can be used to control the camera's
         lens shading correction.  By default, images from the camera are 
         corrected for vignetting by applying different amounts of gain to each
         pixel.  The lens shading table sets this gain, so if you are using a 
@@ -2566,7 +2584,26 @@ class PiCamera(object):
         allow you to remove vignetting artefacts from your images.  NB this 
         correction is not applied to the raw Bayer data captured with the 
         option ``bayer=True``.
-        
+
+        The value of this propertu must be ``None`` or an object that supports 
+        the :ref:`buffer protocol<bufferobjects>`.  It must have a shape that 
+        is ``(4, w, h)`` where ``w`` and ``h`` are the width and height of the
+        lens shading table respectively.  These will be 1/64th of the size of
+        the current video mode (before any resizing has been applied, so most
+        likely the full resolution of the camera), rounded **up** to the nearest
+        integer.  Each value should be an unsigned 8-bit integer, and the reason
+        there are 4 channels is that there is one lens shading table for each
+        square in the Bayer filter - and that filter has two green pixels out
+        of every four.
+
+        A value of 32 means unity gain - so if every element is 32, the lens
+        shading correction is effectively disabled.  Values greater than 32
+        cause the pixels to be made brighter - so usually your lens shading
+        table will be 32 in the middle, and greater towards the edges.
+
+        A convenient way to generate the lens shading table is to use a 
+        ``numpy`` array, and then to call ``memoryview(my_array)`` to return
+        a suitable buffer object.
 
         .. note::
 
@@ -2633,7 +2670,7 @@ class PiCamera(object):
         value = set(value)
         invalid = value - set(self.ISP_BLOCKS.keys())
         if invalid:
-            raise PiCameraValueerror("Invalid ISP block %s" % invalid.pop())
+            raise PiCameraValueError("Invalid ISP block %s" % invalid.pop())
         isp_blocks = reduce(and_, (~v for k, v in self.ISP_BLOCKS.items()
                                   if k not in value), 0xFFFFFFFF)
         config = self._get_config()
