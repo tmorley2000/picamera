@@ -47,7 +47,7 @@ from operator import itemgetter, and_
 from functools import reduce
 from collections import namedtuple
 
-from . import bcm_host, mmal, mmalobj as mo
+from . import bcm_host, mmal, mmalobj as mo, vcsmobj
 from .exc import (
     PiCameraError,
     PiCameraValueError,
@@ -126,14 +126,14 @@ class PiCamera(object):
     will represent. Only the Raspberry Pi compute module currently supports
     more than one camera.
 
-    The *sensor_mode*, *resolution*, *framerate*, *framerate_range*,
-    *clock_mode*, and *isp_blocks* parameters provide initial values for the
-    :attr:`sensor_mode`, :attr:`resolution`, :attr:`framerate`,
-    :attr:`framerate_range`, :attr:`clock_mode`, and :attr:`isp_blocks`
-    attributes of the class (these attributes are all relatively expensive to
-    set individually, hence setting them all upon construction is a speed
-    optimization). Please refer to the attribute documentation for more
-    information and default values.
+    The *sensor_mode*, *resolution*, *framerate*, *framerate_range*, 
+    *lens_shading_table*, *clock_mode*, and *isp_blocks* parameters provide 
+    initial values for the :attr:`sensor_mode`, :attr:`resolution`, 
+    :attr:`framerate`, :attr:`framerate_range`, :attr:`lens_shading_table` 
+    and :attr:`clock_mode` attributes of the class (these attributes are all
+    relatively expensive to set individually, hence setting them all upon
+    construction is a speed optimization). Please refer to the attribute
+    documentation for more information and default values.
 
     The *stereo_mode* and *stereo_decimate* parameters configure dual cameras
     on a compute module for sterescopic mode. These parameters can only be set
@@ -194,6 +194,9 @@ class PiCamera(object):
 
     .. versionchanged:: 1.13
         Added *framerate_range* parameter.
+        
+    .. versionchanged:: 1.14
+        Made *analog_gain* and *digital_gain* writeable and added *lens_shading_table* argument.
 
     .. versionchanged:: 1.14
         Positional arguments are now deprecated; all arguments to the
@@ -380,6 +383,7 @@ class PiCamera(object):
         '_raw_format',
         '_image_effect_params',
         '_exif_tags',
+        '_lens_shading_table',
         )
 
     def __init__(self, *args, **kwargs):
@@ -402,6 +406,7 @@ class PiCamera(object):
         self._exif_tags = {}
         self._used_led = None
         self._led_pin = None
+        self._lens_shading_table = None
         bcm_host.bcm_host_init()
         try:
             self._init_revision(options)
@@ -442,6 +447,7 @@ class PiCamera(object):
             'framerate_range': None,
             'isp_blocks': None,
             'colorspace': 'auto',
+            'lens_shading_table': None,
             }
         arg_names = (
             'camera_num',
@@ -564,13 +570,16 @@ class PiCamera(object):
             isp_blocks = reduce(and_, (~v for k, v in cls.ISP_BLOCKS.items()
                                       if k not in isp_blocks), 0xFFFFFFFF)
 
+        lens_shading_table = options['lens_shading_table']
+
         old_config = PiCameraConfig(
             sensor_mode=0,
             clock_mode=clock_mode,
             resolution=cls.MAX_RESOLUTION,
             framerate=30,
             isp_blocks=0,
-            colorspace=mmal.MMAL_COLOR_SPACE_UNKNOWN)
+            colorspace=mmal.MMAL_COLOR_SPACE_UNKNOWN,
+            lens_shading_table=None)
         new_config = PiCameraConfig(
             sensor_mode=options['sensor_mode'],
             clock_mode=clock_mode,
@@ -2229,7 +2238,8 @@ class PiCamera(object):
             framerate=framerate,
             isp_blocks=self._camera.control.params[
                 mmal.MMAL_PARAMETER_CAMERA_ISP_BLOCK_OVERRIDE],
-            colorspace=self._camera.outputs[0].colorspace
+            colorspace=self._camera.outputs[0].colorspace,
+            lens_shading_table=self._lens_shading_table
         )
 
     def _configure_camera(self, old, new):
@@ -2263,6 +2273,7 @@ class PiCamera(object):
             self._camera.control.params[
                 mmal.MMAL_PARAMETER_CAMERA_CUSTOM_SENSOR_CONFIG
                 ] = new.sensor_mode
+        self._upload_lens_shading_table(new.lens_shading_table)
         if not self._camera.control.enabled:
             # One-time initial setup
             self._camera.control.enable(self._control_callback)
@@ -2471,6 +2482,109 @@ class PiCamera(object):
         default to 0 if not specified.
 
         .. versionadded:: 1.9
+        """)
+        
+    def _lens_shading_table_shape(self, sensor_mode=None):
+        """Calculate the correct shape for a lens shading table.
+        
+        The lens shading table is not the full resolution of the camera - it
+        is defined with one point per 64x64 pixel block.  This means the table
+        should be 1/64 times the size of the sensor, rounding **up** to the 
+        nearest integer.
+        """
+        if sensor_mode is None:
+            sensor_mode = self.sensor_mode
+        #TODO: make sure the resolution is appropriate to the camera mode!
+        full_resolution = [self.MAX_RESOLUTION.width, self.MAX_RESOLUTION.height]
+        return (4,) + tuple([(r // 64) + 1 for r in full_resolution[::-1]])
+        
+    def _validate_lens_shading_table(self, lens_shading_table, sensor_mode):
+        """Check a lens shading table is valid and raise an exception if not."""
+        table_shape = self._lens_shading_table_shape(sensor_mode)
+        if lens_shading_table.shape != table_shape:
+            raise PiCameraValueError("The lens shading table should have shape {} "
+                                     "for mode {}".format(table_shape, sensor_mode))
+        # Ensure the array is uint8.  NB the slightly odd string comparison
+        # avoids a hard dependency on numpy.
+        if lens_shading_table.dtype.name != "uint8":
+            raise PiCameraValueError("Lens shading tables must be uint8")
+        if not lens_shading_table.flags['C_CONTIGUOUS']:
+            raise ValueError("The lens shading table must be a C-contiguous numpy array") # make sure the array is contiguous in memory
+            
+    def _upload_lens_shading_table(self, lens_shading_table, sensor_mode=None):
+        """Actually commit the lens shading table to the camera."""
+        if lens_shading_table is None:
+            self._lens_shading_table = None
+            # Given that we reset the camera each time anyway, hopefully we revert
+            # to built-in lens shading correction by simply doing nothing here!
+            return
+            
+        self._validate_lens_shading_table(lens_shading_table, sensor_mode)
+        nchannels, grid_height, grid_width = lens_shading_table.shape
+        # This sets the lens shading table based on the example code by 6by9
+        # https://github.com/6by9/lens_shading/
+        shared_memory = vcsmobj.VideoCoreSharedMemory(grid_width*grid_height*4, "ls_grid") # allocate shared memory on the GPU
+
+        lens_shading_parameters = mmal.MMAL_PARAMETER_LENS_SHADING_T(
+            hdr = mmal.MMAL_PARAMETER_HEADER_T(
+                mmal.MMAL_PARAMETER_LENS_SHADING_OVERRIDE,
+                ct.sizeof(mmal.MMAL_PARAMETER_LENS_SHADING_T),
+                ),
+            enabled = mmal.MMAL_TRUE,
+            grid_cell_size = 64,
+            grid_width = grid_width,
+            grid_stride = grid_width,
+            grid_height = grid_height,
+            mem_handle_table = shared_memory.videocore_handle,
+            ref_transform = 3,# TODO: figure out what this should be properly!!!
+            )
+
+        shared_memory.copy_from_array(lens_shading_table) # copy in the array
+        self._camera.control.params[mmal.MMAL_PARAMETER_LENS_SHADING_OVERRIDE] = lens_shading_parameters
+        self._lens_shading_table = lens_shading_table
+
+    def _get_lens_shading_table(self):
+        self._check_camera_open()
+        return self._lens_shading_table
+    def _set_lens_shading_table(self, value):
+        self._check_camera_open()
+        self._check_recording_stopped()
+        config = self._get_config()
+        self._disable_camera()
+        self._configure_camera(config, config._replace(lens_shading_table=value))
+        self._configure_splitter()
+        self._enable_camera()
+    lens_shading_table = property(_get_lens_shading_table, 
+                                  _set_lens_shading_table, doc="""\
+        Retrieves or sets the lens shading correction table.
+
+        This is an advanced property which can be used to control the camera's
+        lens shading correction.  By default, images from the camera are 
+        corrected for vignetting by applying different amounts of gain to each
+        pixel.  The lens shading table sets this gain, so if you are using a 
+        lens other than the one supplied with the camera, this property should
+        allow you to remove vignetting artefacts from your images.  NB this 
+        correction is not applied to the raw Bayer data captured with the 
+        option ``bayer=True``.
+        
+
+        .. note::
+
+            By default, this property is None, and the camera's built-in lens
+            shading is used, which is correct for the lens supplied with the
+            camera module.  It is not currently possible to read the lens 
+            shading table back from the GPU, so this property will only have a
+            useful value if you have previously set it manually.
+            
+            Also, using this property with binned or cropped modes of the
+            camera may produce unpredictable results.
+
+        The initial value of this property can be specified with the
+        *lens_shading_table* parameter in the :class:`PiCamera` constructor.
+        As it is an expensive parameter to set otherwise, it is best to use
+        the constructor rather than to change the property afterwards.
+
+        .. versionadded:: 1.14
         """)
 
     def _get_clock_mode(self):
@@ -2975,14 +3089,33 @@ class PiCamera(object):
         self._check_camera_open()
         return mo.to_fraction(
             self._camera.control.params[mmal.MMAL_PARAMETER_CAMERA_SETTINGS].analog_gain)
-    analog_gain = property(_get_analog_gain, doc="""\
-        Retrieves the current analog gain of the camera.
+    def _set_analog_gain(self, value):
+        self._check_camera_open()
+        self._camera.control.params[mmal.MMAL_PARAMETER_ANALOG_GAIN] = value
+    analog_gain = property(_get_analog_gain, _set_analog_gain, doc="""\
+        Retrieves or sets the current analog gain of the camera.
 
         When queried, this property returns the analog gain currently being
         used by the camera. The value represents the analog gain of the sensor
         prior to digital conversion. The value is returned as a
         :class:`~fractions.Fraction` instance.
+        
+        When set, the property adjusts the analog gain of the camera, which
+        most obviously affects the brightness and noise of subsequently captured
+        images. Analog gain can be adjusted while previews or recordings are
+        running.
 
+        .. note::
+
+            Setting the analog gain requires up-to-date userland libraries and
+            firmware on your Raspberry Pi.  Setting the analog gain will raise
+            a PiCameraMMALError if your userland libraries do not support setting
+            the analog gain.
+            
+            Also, it may be necessary to set the camera's ``iso`` property to 0
+            in order for setting the analog gain to work properly, due to the way
+            it is implemented in the GPU firmware.
+            
         .. versionadded:: 1.6
         """)
 
@@ -2990,13 +3123,29 @@ class PiCamera(object):
         self._check_camera_open()
         return mo.to_fraction(
             self._camera.control.params[mmal.MMAL_PARAMETER_CAMERA_SETTINGS].digital_gain)
-    digital_gain = property(_get_digital_gain, doc="""\
+    def _set_digital_gain(self, value):
+        self._check_camera_open()
+        self._camera.control.params[mmal.MMAL_PARAMETER_DIGITAL_GAIN] = value
+    digital_gain = property(_get_digital_gain, _set_digital_gain, doc="""\
         Retrieves the current digital gain of the camera.
 
         When queried, this property returns the digital gain currently being
         used by the camera. The value represents the digital gain the camera
         applies after conversion of the sensor's analog output. The value is
         returned as a :class:`~fractions.Fraction` instance.
+        
+        When set, the property adjusts the digital gain of the camera, which
+        most obviously affects the brightness and noise of subsequently captured
+        images. Digital gain can be adjusted while previews or recordings are
+        running.
+
+        .. note::
+
+            Setting the digital gain requires up-to-date userland libraries and
+            firmware on your Raspberry Pi.  Setting the digital gain will raise
+            a PiCameraMMALError if your userland libraries do not support setting
+            the digital gain.
+            
 
         .. versionadded:: 1.6
         """)
