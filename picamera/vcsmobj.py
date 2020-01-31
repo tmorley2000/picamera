@@ -217,6 +217,22 @@ class VideoCoreSharedMemory():
         with self.lock() as destination:
             ctypes.memmove(destination, source, size)
 
+    def copy_from_memoryview(self, source):
+        """Copy the contents of a memoryview object into the buffer.
+
+        Arguments:
+            source: memoryview
+                The data to copy into the buffer, as a memoryview object.  Must
+                be contiguous in memory.
+        """
+        if not isinstance(source, memoryview):
+            raise ValueError("copy_from_memoryview requires a Python memoryview object.")
+        if not source.contiguous:
+            raise ValueError("Can only copy contiguous objects into VideoCore Shared Memory.")
+        # Convert the source memoryview object into a ctypes array (NB this shouldn't copy it)
+        ctypes_array = (ctypes.c_ubyte * source.nbytes)(source)
+        self.copy_from_buffer(ctypes_array, source.nbytes)
+
     def copy_from_array(self, source):
         """Copy the contents of a numpy array into the buffer.
 

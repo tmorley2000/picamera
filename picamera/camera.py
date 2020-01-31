@@ -2501,34 +2501,21 @@ class PiCamera(object):
     def _validate_lens_shading_table(self, lens_shading_table, sensor_mode):
         """Check a lens shading table is valid and raise an exception if not.
         
-        ``lens_shading_table`` should be a 
-
-        If the object passed to this function is not a memoryview object, we 
-        will attempt to create one by calling ``memoryview(lens_shading_table)``
-        and using the result.
+        ``lens_shading_table`` should be a memoryview object, with unsigned 
+        char elements, and a shape of (4, w, h).
         """
-        if not isinstance(lens_shading_table, memoryview):
-            try:
-                lens_shading_table = memoryview(lens_shading_table)
-            except:
-                raise PiCameraValueError("The lens shading table must be a "
-                                         "memoryview object, or must be able "
-                                         "to be converted to one by calling "
-                                         "memoryview(obj).")
-        table_shape = self._lens_shading_table_shape(sensor_mode)
-        if lens_shading_table.shape != table_shape:
-            raise PiCameraValueError("The lens shading table should have shape {} "
-                                     "for mode {}".format(table_shape, sensor_mode))
-        # Ensure the array is uint8.  NB the slightly odd string comparison
-        # avoids a hard dependency on numpy.
-        if lens_shading_table.format != "B":
-            raise PiCameraValueError("Lens shading tables must be unsigned 8-bit integers")
-        if not lens_shading_table.c_contiguous:
-            raise ValueError("The lens shading table must be a C-contiguous array of unsigned bytes") # make sure the array is contiguous in memory
-        return lens_shading_table
+        with memoryview(lens_shading_table) as m:
+            table_shape = self._lens_shading_table_shape(sensor_mode)
+            if m.shape != table_shape:
+                raise PiCameraValueError("The lens shading table should have shape {} "
+                                        "for mode {}".format(table_shape, sensor_mode))
+            if m.format != "B":
+                raise PiCameraValueError("Lens shading tables must be unsigned 8-bit integers")
+            if not m.c_contiguous:
+                raise ValueError("The lens shading table must be a C-contiguous array of unsigned bytes")
             
     def _upload_lens_shading_table(self, lens_shading_table, sensor_mode=None):
-        """Actually commit the lens shading table to the camera.
+        """Actually commit the lens shading table to the GPU.
         
         See documentation for the ``lens_shading_table property`` for details of the arguments."""
         if lens_shading_table is None:
@@ -2537,29 +2524,31 @@ class PiCamera(object):
             # to built-in lens shading correction by simply doing nothing here!
             return
             
-        lens_shading_table = self._validate_lens_shading_table(lens_shading_table, sensor_mode)
-        nchannels, grid_height, grid_width = lens_shading_table.shape
-        # This sets the lens shading table based on the example code by 6by9
-        # https://github.com/6by9/lens_shading/
-        shared_memory = vcsmobj.VideoCoreSharedMemory(grid_width*grid_height*4, "ls_grid") # allocate shared memory on the GPU
+        with memoryview(lens_shading_table) as m:
+            self._validate_lens_shading_table(m, sensor_mode)
+            nchannels, grid_height, grid_width = m.shape
+            # This sets the lens shading table based on the example code by 6by9
+            # https://github.com/6by9/lens_shading/
+            shared_memory = vcsmobj.VideoCoreSharedMemory(grid_width*grid_height*4, "ls_grid") # allocate shared memory on the GPU
 
-        lens_shading_parameters = mmal.MMAL_PARAMETER_LENS_SHADING_T(
-            hdr = mmal.MMAL_PARAMETER_HEADER_T(
-                mmal.MMAL_PARAMETER_LENS_SHADING_OVERRIDE,
-                ct.sizeof(mmal.MMAL_PARAMETER_LENS_SHADING_T),
-                ),
-            enabled = mmal.MMAL_TRUE,
-            grid_cell_size = 64,
-            grid_width = grid_width,
-            grid_stride = grid_width,
-            grid_height = grid_height,
-            mem_handle_table = shared_memory.videocore_handle,
-            ref_transform = 3,# TODO: figure out what this should be properly!!!
-            )
+            lens_shading_parameters = mmal.MMAL_PARAMETER_LENS_SHADING_T(
+                hdr = mmal.MMAL_PARAMETER_HEADER_T(
+                    mmal.MMAL_PARAMETER_LENS_SHADING_OVERRIDE,
+                    ct.sizeof(mmal.MMAL_PARAMETER_LENS_SHADING_T),
+                    ),
+                enabled = mmal.MMAL_TRUE,
+                grid_cell_size = 64,
+                grid_width = grid_width,
+                grid_stride = grid_width,
+                grid_height = grid_height,
+                mem_handle_table = shared_memory.videocore_handle,
+                ref_transform = 3,# TODO: figure out what this should be properly!!!
+                )
 
-        shared_memory.copy_from_array(lens_shading_table) # copy in the array
-        self._camera.control.params[mmal.MMAL_PARAMETER_LENS_SHADING_OVERRIDE] = lens_shading_parameters
-        self._lens_shading_table = lens_shading_table
+            shared_memory.copy_from_memoryview(m) # copy in the array
+            self._camera.control.params[mmal.MMAL_PARAMETER_LENS_SHADING_OVERRIDE] = lens_shading_parameters
+            bytes_copy = m.tobytes() # Take a copy of the LST in a Bytes object
+            self._lens_shading_table = memoryview(bytes_copy).cast(m.format, m.shape)
 
     def _get_lens_shading_table(self):
         self._check_camera_open()
@@ -2583,11 +2572,12 @@ class PiCamera(object):
         lens other than the one supplied with the camera, this property should
         allow you to remove vignetting artefacts from your images.  NB this 
         correction is not applied to the raw Bayer data captured with the 
-        option ``bayer=True``.
+        option `bayer=True`, though it does apply to uncompressed images 
+        captured using `PiRGBArray` or similar.
 
-        The value of this propertu must be ``None`` or an object that supports 
-        the :ref:`buffer protocol<bufferobjects>`.  It must have a shape that 
-        is ``(4, w, h)`` where ``w`` and ``h`` are the width and height of the
+        The value of this property must be `None` or an object that supports 
+        the :ref:`buffer protocol<bufferobjects>`. It must have a shape  
+        of `(4, w, h)` where `w` and `h` are the width and height of the
         lens shading table respectively.  These will be 1/64th of the size of
         the current video mode (before any resizing has been applied, so most
         likely the full resolution of the camera), rounded **up** to the nearest
@@ -2602,8 +2592,13 @@ class PiCamera(object):
         table will be 32 in the middle, and greater towards the edges.
 
         A convenient way to generate the lens shading table is to use a 
-        ``numpy`` array, and then to call ``memoryview(my_array)`` to return
-        a suitable buffer object.
+        `numpy` array.
+
+        Reading the value of this property is not recommended, but should
+        return the last-used lens shading table as a `memoryview` object
+        or `None`.  If you need to convert this to a `numpy` array, this is
+        simply a case of wrapping the call in the array constructor, i.e.
+        `np.array(camera.lens_shading_table)`.
 
         .. note::
 
