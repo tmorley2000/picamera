@@ -114,6 +114,7 @@ PiCameraConfig = namedtuple('PiCameraConfig', (
     'framerate',
     'isp_blocks',
     'colorspace',
+    'lens_shading_table',
 ))
 
 
@@ -586,7 +587,8 @@ class PiCamera(object):
             resolution=resolution,
             framerate=framerate,
             isp_blocks=isp_blocks,
-            colorspace=colorspace)
+            colorspace=colorspace,
+            lens_shading_table=lens_shading_table)
         return old_config, new_config
 
     def _init_led(self, options):
@@ -2239,7 +2241,7 @@ class PiCamera(object):
             isp_blocks=self._camera.control.params[
                 mmal.MMAL_PARAMETER_CAMERA_ISP_BLOCK_OVERRIDE],
             colorspace=self._camera.outputs[0].colorspace,
-            lens_shading_table=self._lens_shading_table
+            lens_shading_table=self._lens_shading_table,
         )
 
     def _configure_camera(self, old, new):
