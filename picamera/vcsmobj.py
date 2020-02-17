@@ -229,9 +229,13 @@ class VideoCoreSharedMemory():
             raise ValueError("copy_from_memoryview requires a Python memoryview object.")
         if not source.contiguous:
             raise ValueError("Can only copy contiguous objects into VideoCore Shared Memory.")
-        # Convert the source memoryview object into a ctypes array (NB this shouldn't copy it)
-        ctypes_array = (ctypes.c_ubyte * source.nbytes)(source)
+        # Convert the source memoryview object into a ctypes array, copying if read-only
+        if source.readonly:
+            ctypes_array = (ctypes.c_ubyte * source.nbytes).from_buffer_copy(source)
+        else:
+            ctypes_array = (ctypes.c_ubyte * source.nbytes).from_buffer(source)
         self.copy_from_buffer(ctypes_array, source.nbytes)
+        del ctypes_array # Make sure we release the copy, if we made one
 
     def copy_from_array(self, source):
         """Copy the contents of a numpy array into the buffer.
