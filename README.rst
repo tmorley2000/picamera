@@ -1,5 +1,11 @@
 .. -*- rst -*-
 
+Project moved
++++++++++++++
+
+Lens-shading support, writeable analog gain, and other additional features have been 
+merged into the `picamerax` library at https://github.com/labthings/picamerax.
+
 ========
 picamera
 ========
